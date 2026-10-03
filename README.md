@@ -46,10 +46,12 @@ design size, so any other viewport is letterboxed rather than stretched.
 index.html              #game-root (Pixi canvas) + #ui-root (React), layered
 src/
   main.tsx              entry: mounts React, then boots the Pixi runtime
+  config/
+    economy.ts          ← THE ONE CONFIG MODULE: every balance number, and the min()
   game/
     runtime.ts          ← the one requestAnimationFrame loop lives here
   sim/                  pure logic, no DOM, no Pixi — all of it unit-tested
-    constants.ts        tick rate, catch-up clamp, design size
+    constants.ts        tick rate, catch-up clamp, design size, autosave cadence
     fixedStepLoop.ts    ← THE SIMULATION TICK
     economy.ts          placeholder economy state and its one-tick step
     offline.ts          elapsed-time-since-last-seen, clamped and sign-safe
@@ -66,6 +68,37 @@ src/
   ui/                   React: every panel, counter and button is DOM
   styles/global.css     layering, safe-area variables, mobile scroll locks
 ```
+
+## Where the balance numbers live
+
+**`src/config/economy.ts`** — all of them, and nothing else does. Prices, costs,
+growth rates, the guest mix, Last Call, offline earnings, the design-side entity
+caps. Every value is the one verified in DUB-4 against the §4.4 pacing table.
+
+`src/sim/constants.ts` is the only other constants file and the split is strict:
+`config/economy.ts` changes how the game **plays**, `sim/constants.ts` changes how
+it **runs** (tick rate, catch-up clamp, design size, autosave cadence).
+
+That module also owns the throughput rule the whole design rests on:
+
+```
+income/s = SUM over stations [ min(guests routed, lanes / serveTime) * drinkPrice(level) ]
+```
+
+Station level buys cash per guest; lanes and the Door buy guests per second. The
+`min()` couples them, and it is why a queue at the bar means "buy a lane" and a
+queue at the door means "buy the Door". `src/config/economy.test.ts` has tests
+whose only job is to fail if that `min()` is ever simplified away.
+
+`tools/economy-sim.ts` imports from this module rather than keeping its own copy,
+so the model that was signed off and the game that ships cannot drift apart:
+
+```
+npm run sim:economy        # exits non-zero if any §4.4 row falls outside ±20%
+```
+
+**After changing any number in `config/economy.ts`, run that.** It currently
+reports 13/13 rows passing and club complete at 11,783/s.
 
 ## Where the simulation tick lives
 

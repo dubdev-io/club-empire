@@ -24,45 +24,31 @@
 // ---------------------------------------------------------------------------
 // Constants (§4.4)
 // ---------------------------------------------------------------------------
+//
+// There are no constants in this file. Every number comes from
+// `src/config/economy.ts`, the single config module the brief asks for, so the
+// model that was signed off in DUB-4 and the game that ships cannot drift apart.
+// Changing a balance number means editing that file and re-running this script.
 
-const STARTING_CASH = 30;
-const COST_GROWTH = 1.21; // R — upgrade cost multiplier per station level
-const INCOME_GROWTH = 1.09; // M — drink price multiplier per station level
-const STAR_LEVELS = [10, 20, 30];
-const STAR_MULTIPLIER = 2;
-const MAX_STATION_LEVEL = 30;
-const MAX_LANES = 3;
-const DOOR_MAX = 8;
+import {
+  AVERAGE_SPEND_MULTIPLIER,
+  COST_GROWTH,
+  DOOR_ARRIVAL_GROWTH,
+  DOOR_BASE_ARRIVALS as DOOR_BASE_ARRIVALS_DEFAULT,
+  DOOR_MAX,
+  MAX_LANES,
+  MAX_STATION_LEVEL,
+  STAR_LEVELS,
+  STARTING_CASH,
+  STATION_DEFS,
+  doorUpgradeCost,
+  incomePerSecond as incomeOf,
+  laneCost as laneCostOf,
+  stationCapacity,
+  type StationDef,
+} from '../src/config/economy.ts';
+import { TICK_SECONDS, TICKS_PER_SECOND } from '../src/sim/constants.ts';
 
-const DOOR_ARRIVAL_GROWTH = 1.2;
-const DOOR_COST_BASE = 60;
-const DOOR_COST_GROWTH = 2.6;
-
-/** 0.92 Regular x1.0 + 0.08 VIP x6.0. */
-const VIP_SPEND_MULTIPLIER = 1.4;
-
-interface StationDef {
-  key: string;
-  name: string;
-  unlockCost: number;
-  /** First upgrade cost. */
-  c1: number;
-  /** Drink price at level 1. */
-  p1: number;
-  /** Seconds to serve one guest, per lane. */
-  serveTime: number;
-  /** Cost of lanes 1..3. Lane 1 comes free with the unlock. */
-  laneCosts: readonly [number, number, number];
-}
-
-const STATION_DEFS: readonly StationDef[] = [
-  { key: 'tap', name: 'Tap Bar', unlockCost: 0, c1: 5, p1: 2, serveTime: 2.0, laneCosts: [0, 400, 3_200] },
-  { key: 'cocktail', name: 'Cocktail Bar', unlockCost: 900, c1: 90, p1: 18, serveTime: 3.0, laneCosts: [0, 7_000, 56_000] },
-  { key: 'booth', name: 'Booth Service', unlockCost: 18_000, c1: 900, p1: 150, serveTime: 4.5, laneCosts: [0, 140_000, 1_120_000] },
-];
-
-const TICKS_PER_SECOND = 10;
-const TICK_SECONDS = 1 / TICKS_PER_SECOND;
 const SIM_LIMIT_SECONDS = 60 * 60;
 
 // ---------------------------------------------------------------------------
@@ -81,10 +67,16 @@ function numericFlag(prefix: string, fallback: number): number {
 
 const useVip = argv.includes('--vip');
 const showPurchases = argv.includes('--purchases');
-const DOOR_BASE_ARRIVALS = numericFlag('--arrivals=', 0.9);
+const DOOR_BASE_ARRIVALS = numericFlag('--arrivals=', DOOR_BASE_ARRIVALS_DEFAULT);
 /** Scales every station's P1 — use with --vip to cancel the uplift at source. */
 const priceScale = numericFlag('--price-scale=', 1);
-const spendMultiplier = (useVip ? VIP_SPEND_MULTIPLIER : 1) * priceScale;
+
+/**
+ * The §4.4 table is specified for Regular guests only, so the default run
+ * prices at 1.0 and `--vip` opts into the real guest mix. The shipping game
+ * always runs with the mix — that is the recorded option (a).
+ */
+const spendMultiplier = (useVip ? AVERAGE_SPEND_MULTIPLIER : 1) * priceScale;
 
 // ---------------------------------------------------------------------------
 // State
@@ -132,27 +124,20 @@ function station(s: State, key: string): StationState {
 }
 
 // ---------------------------------------------------------------------------
-// Formulae
+// Formulae — all of them delegate to src/config/economy.ts
 // ---------------------------------------------------------------------------
-
-function starsAtOrBelow(level: number): number {
-  return STAR_LEVELS.filter((l) => l <= level).length;
-}
+//
+// These wrappers exist only to adapt the sim's mutable `State` to the config's
+// plain `ClubProgress`, and to apply the two CLI overrides. There is no second
+// implementation of any curve: if the sim and the game ever disagree about a
+// price, it is a bug in this adapter, not a drifted constant.
 
 function upgradeCost(st: StationState): number {
   return st.def.c1 * COST_GROWTH ** (st.level - 1);
 }
 
-function drinkPrice(st: StationState): number {
-  return st.def.p1 * INCOME_GROWTH ** (st.level - 1) * STAR_MULTIPLIER ** starsAtOrBelow(st.level) * spendMultiplier;
-}
-
 function laneCost(def: StationDef, lane: number): number {
-  const [first, second, third] = def.laneCosts;
-  if (lane === 1) return first;
-  if (lane === 2) return second;
-  if (lane === 3) return third;
-  throw new Error(`no lane ${lane} on ${def.name}`);
+  return laneCostOf(def, lane);
 }
 
 function arrivalsPerSecond(door: number): number {
@@ -160,45 +145,31 @@ function arrivalsPerSecond(door: number): number {
 }
 
 function doorCost(door: number): number {
-  return DOOR_COST_BASE * DOOR_COST_GROWTH ** (door - 1);
-}
-
-/** Guests per second a station can serve with the lanes it has. */
-function capacity(st: StationState): number {
-  return st.lanes / st.def.serveTime;
+  return doorUpgradeCost(door);
 }
 
 function totalCapacity(s: State): number {
-  return s.stations.reduce((sum, st) => sum + (st.unlocked ? capacity(st) : 0), 0);
+  return s.stations.reduce((sum, st) => sum + (st.unlocked ? stationCapacity(st.def, st.lanes) : 0), 0);
 }
 
 /**
- * The throughput rule — the whole design.
- *
- *   income/s = SUM over stations [ min(guests routed, lanes / serveTime) * drinkPrice ]
- *
- * Routing sends each guest to the highest-drink-price station with a free lane,
- * so in steady state the highest-price station fills its capacity first and the
- * remainder overflows down the price order. Per-station queues (max 4) and door
- * waiting buffer arrival jitter but cannot change the steady-state *rate*, so
- * they are deliberately not modelled here — they are a latency and animation
- * concern, not an income one.
- *
- * Station level buys cash per guest. Lanes and the Door buy guests per second.
- * The `min()` is what couples them, and it is why a level-only income model
- * would pass this simulation and ship a broken game.
+ * The throughput rule, straight out of the config module. See
+ * `incomePerSecond` in `src/config/economy.ts` for why the `min()` is the whole
+ * design and why queues are deliberately not modelled here.
  */
 function incomePerSecond(s: State): number {
-  const open = s.stations.filter((st) => st.unlocked && st.lanes > 0).sort((a, b) => drinkPrice(b) - drinkPrice(a));
-
-  let remaining = arrivalsPerSecond(s.door);
-  let income = 0;
-  for (const st of open) {
-    const served = Math.min(remaining, capacity(st));
-    income += served * drinkPrice(st);
-    remaining -= served;
-  }
-  return income;
+  return incomeOf(
+    {
+      doorLevel: s.door,
+      stations: s.stations.map((st) => ({
+        key: st.def.key,
+        unlocked: st.unlocked,
+        level: st.level,
+        lanes: st.lanes,
+      })),
+    },
+    { spendMultiplier, arrivalsPerSecond: arrivalsPerSecond(s.door) },
+  );
 }
 
 // ---------------------------------------------------------------------------
