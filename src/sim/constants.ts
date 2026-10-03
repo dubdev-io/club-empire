@@ -23,3 +23,15 @@ export const MAX_CATCHUP_TICKS = 600;
 /** Portrait design resolution. Everything on the Pixi stage is authored at this size. */
 export const DESIGN_WIDTH = 390;
 export const DESIGN_HEIGHT = 844;
+
+/**
+ * How often the save is written while the tab is in the foreground.
+ *
+ * 5 s is the DUB-5/DUB-6 requirement, and it is the worst-case progress loss
+ * for a crash or an OS tab kill that fires no lifecycle event. The lifecycle
+ * handlers (`visibilitychange`, `pagehide`) cover every *graceful* exit; this
+ * interval exists only for the ungraceful ones, so it is deliberately
+ * wall-clock rather than simulation time — a backgrounded tab must not keep
+ * writing, and a throttled timer there is the correct behaviour.
+ */
+export const AUTOSAVE_INTERVAL_MS = 5_000;

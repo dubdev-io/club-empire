@@ -9,7 +9,13 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
-    sourcemap: true,
+    // Off by default: the maps are ~3.4 MB of host payload and they publish
+    // readable source. They are not fetched unless devtools is open, so they
+    // do not count against the 4 MB transferred budget, but there is no reason
+    // to host them for every build. `npm run build:debug` turns them back on
+    // when a readable stack trace off a real device is worth more than the
+    // payload.
+    sourcemap: process.env.CLUB_EMPIRE_SOURCEMAP === 'true',
     // Pixi's own chunk is ~512 kB raw / ~145 kB gzipped and that is simply
     // what a WebGL engine costs. The limit is set just above it so the build
     // stays warning-free today but still shouts if the engine chunk grows or

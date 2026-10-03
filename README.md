@@ -142,8 +142,14 @@ Production JS, gzipped (`npm run build`):
 | rolldown-runtime| 0.7 kB    | 0.4 kB    |
 | **total JS**    | **744 kB**| **219 kB**|
 
-Plus 2.3 kB CSS (0.95 kB gzipped). Budget for this stage is 300 kB gzipped.
-There are no asset files at all — the placeholder art is generated at runtime.
+Plus 2.3 kB CSS (0.95 kB gzipped) and a 0.2 kB favicon. Budget for this stage is
+300 kB gzipped. The only asset file is the favicon — the placeholder art is
+generated at runtime.
+
+`npm run build` emits **no sourcemaps**: they were 3.4 MB of host payload and
+published readable source for no benefit to the player. Use `npm run build:debug`
+(`CLUB_EMPIRE_SOURCEMAP=true`) when you need a readable stack trace off a real
+device; that build is ~4.0 MB on disk and must not be the one that gets hosted.
 
 ## Dev-only helper
 

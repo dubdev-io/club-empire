@@ -1,6 +1,7 @@
 import { ClubFloor } from '../render/clubFloor.ts';
 import { createStage, type Stage } from '../render/stage.ts';
 import { createTextures, type GeneratedTextures } from '../render/textures.ts';
+import { AUTOSAVE_INTERVAL_MS } from '../sim/constants.ts';
 import { FixedStepLoop } from '../sim/fixedStepLoop.ts';
 import {
   barUpgradeCost,
@@ -13,9 +14,6 @@ import {
 import { computeOfflineElapsed } from '../sim/offline.ts';
 import { createSave, getBrowserStorage, loadSave, writeSave, type SaveStorage } from '../save/storage.ts';
 import { useGameStore, type UiSnapshot } from '../state/store.ts';
-
-/** How often the save is written while the tab is in the foreground. */
-const AUTOSAVE_INTERVAL_MS = 15_000;
 
 /** How often the UI read model is refreshed. 10 Hz is below the eye's ability
  *  to read a changing number and well under the React render budget. */
