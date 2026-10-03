@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+.DS_Store
+.vite/
+.eslintcache
+npm-debug.log*
+
+# Local Claude Code harness settings, not project config
+.claude/settings.local.json
