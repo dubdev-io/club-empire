@@ -137,8 +137,11 @@
   text-align: right;
 }
 
+/* Ink, not violet: at 12 px / 600 the violet tag measured 4.55:1, the thinnest
+   margin in the game, on the one element §4.4b *promotes* when nothing is
+   affordable. The violet belongs to the fill, which carries no text. */
 .meter__tag {
-  color: var(--neon-violet);
+  color: var(--ink-primary);
   font-weight: var(--weight-semibold);
   letter-spacing: 0.06em;
 }
@@ -466,29 +469,33 @@
   color: var(--ink-disabled);
 }
 
+/* Label above the track, never across it: a fill that stops mid-word reads as
+   a rendering bug rather than as progress. With no glyphs over it the fill can
+   carry its own weight instead of hiding at 22%. */
 .star-progress {
-  position: relative;
-  height: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.star-progress__label {
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+
+.star-progress__track {
+  height: var(--space-2);
   background: var(--bg-surface);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   overflow: hidden;
 }
 
 .star-progress__fill {
   height: 100%;
   background: var(--gold-vip);
-  opacity: 0.22;
+  opacity: 0.6;
+  border-radius: var(--radius-pill);
   transition: width var(--motion-base) var(--ease);
-}
-
-.star-progress__label {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  padding: 0 var(--space-2);
-  font-size: var(--text-xs);
-  color: var(--ink-secondary);
 }
 
 /* --- door comparison ----------------------------------------------------- */
@@ -749,7 +756,11 @@
   position: relative;
   background: var(--bg-surface);
   border-radius: var(--radius-lg);
-  padding: var(--space-5);
+  /* Narrower side padding than top/bottom: at 24 px all round the §5 capped
+     line set with "far" alone on its own line at 390 px. 16 px gives the
+     measure the ~16 px it was short, and the copy is the designer's, so the
+     layout moves rather than the words. */
+  padding: var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -815,6 +826,9 @@
   margin: 0 0 var(--space-2);
   font-size: var(--text-sm);
   color: var(--ink-secondary);
+  /* Two balanced lines rather than a long line plus an orphan. Degrades to
+     normal wrapping where unsupported, which is the pre-fix behaviour. */
+  text-wrap: balance;
 }
 
 .card__note--next strong {

@@ -163,11 +163,16 @@ export function DoorSheet(): React.JSX.Element {
         </span>
       </p>
 
+      {/* Same terminal-state rule as the Bars sheet: at Lv 8 "Upgrade to Door
+          Lv 8" is literally wrong, so the label states where the door is
+          instead of offering a step it cannot take. */}
       <BuyButton
-        label={`Upgrade to Door Lv ${Math.min(doorLevel + 1, DOOR_MAX)}`}
+        label={
+          doorMaxed ? `Door Lv ${DOOR_MAX} — maxed` : `Upgrade to Door Lv ${doorLevel + 1}`
+        }
         price={formatCash(doorCost ?? 0)}
         affordable={doorCost !== null && cash >= doorCost}
-        doneLabel={doorMaxed ? `Lv ${DOOR_MAX} MAXED` : undefined}
+        doneLabel={doorMaxed ? `Lv ${DOOR_MAX} of ${DOOR_MAX}` : undefined}
         accent="cyan"
         onBuy={actions.upgradeDoor}
       />

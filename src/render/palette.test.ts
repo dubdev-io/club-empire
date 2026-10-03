@@ -61,6 +61,34 @@ describe('the canvas palette mirrors the CSS tokens', () => {
     expect(palette[constant]).toBe(expected);
   });
 
+  describe('mixTint interpolates between two tokens', () => {
+    // The dance-floor trail (craft fix A) fades every lit tile back to rest
+    // through this function. A channel that wraps shows up as a tile flashing
+    // the wrong colour on the beat, which is both the most visible surface in
+    // the game and the hardest thing to catch by eye in a 2 Hz animation.
+    it('returns the endpoints exactly', () => {
+      expect(palette.mixTint(palette.BG_RAISED, palette.NEON_MAGENTA, 0)).toBe(palette.BG_RAISED);
+      expect(palette.mixTint(palette.BG_RAISED, palette.NEON_MAGENTA, 1)).toBe(
+        palette.NEON_MAGENTA,
+      );
+    });
+
+    it('stays inside each channel at the halfway point', () => {
+      // 0x23 -> 0xff, 0x1f -> 0x3d, 0x3a -> 0x9a
+      expect(palette.mixTint(palette.BG_RAISED, palette.NEON_MAGENTA, 0.5)).toBe(0x912e6a);
+    });
+
+    it('clamps rather than wrapping a channel', () => {
+      for (const t of [-1, -0.0001, 1.0001, 2]) {
+        const mixed = palette.mixTint(palette.BG_RAISED, palette.GOLD_VIP, t);
+        expect(mixed).toBeGreaterThanOrEqual(0);
+        expect(mixed).toBeLessThanOrEqual(0xffffff);
+      }
+      expect(palette.mixTint(palette.BG_RAISED, palette.GOLD_VIP, 2)).toBe(palette.GOLD_VIP);
+      expect(palette.mixTint(palette.BG_RAISED, palette.GOLD_VIP, -1)).toBe(palette.BG_RAISED);
+    });
+  });
+
   it('derives guest and beat colours from the tokens, not from new hexes', () => {
     // §10: the room is not allowed to drift away from the palette, and a
     // one-off "nearly magenta" is exactly how that starts.

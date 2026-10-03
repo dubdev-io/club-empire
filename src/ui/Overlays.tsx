@@ -177,7 +177,9 @@ export function ClubComplete(): React.JSX.Element | null {
           <Stat label="Earning" value={`${formatCash(baseIncome)}/s`} />
           <Stat label="Total earned" value={formatCash(totalEarned)} />
           <Stat label="Upgrades bought" value={String(purchaseCount)} />
-          <Stat label="Tips collected" value={String(bubblesCollected)} />
+          {/* "Cash bubbles" everywhere, including here — the brief has one word
+              for the most-tapped object in the game and this said "tips". */}
+          <Stat label="Cash bubbles tapped" value={String(bubblesCollected)} />
           <Stat label="Last Calls" value={String(lastCallFiredCount)} />
         </dl>
 
