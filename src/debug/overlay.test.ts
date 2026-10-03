@@ -1,14 +1,19 @@
 /**
- * The `valid` verdict, which is the one part of the overlay a test can reach.
+ * The two parts of the overlay a test can reach: the `valid` verdict and the
+ * freeze latch.
  *
  * DUB-10 exists because a report that was wrong in two separate ways still
  * looked complete, and the only thing standing between that happening again
- * and it not is the rule table below. Everything else in `overlay.ts` needs a
- * DOM, a WebGL context and a frame clock — `vitest` runs on the node
- * environment, so those parts are verified by running the published build in a
- * browser and reading the panel back (see the README). This part does not need
- * any of that, so it is checked here rather than by eye on a phone, which is
- * the whole argument of the ticket applied to its own code.
+ * and it not is the rule table below. DUB-12 is the same failure one layer in:
+ * the panel said `FROZEN`, and three of its fields carried on moving anyway.
+ * Both are "the report says something untrue about itself", and both are now
+ * rules in code rather than things somebody has to notice on a phone.
+ *
+ * The rest of `overlay.ts` needs a DOM, a WebGL context and a frame clock —
+ * `vitest` runs on the node environment, so those parts are verified by running
+ * the published build in a browser and reading the panel back (see the README).
+ * Neither of these two needs any of that, which is why they are shaped as
+ * exported, injectable units in the first place.
  *
  * The reason strings are asserted literally, not by substring. They are what
  * the owner reads and pastes, and a reason that drifted into saying something
@@ -20,9 +25,11 @@ import {
   C1_BARTENDERS,
   C1_GUESTS,
   C1_QUEUES,
+  createWindowFreeze,
   validityVerdict,
   type MeasurementWindow,
 } from './overlay.ts';
+import type { FrameReport } from '../game/frameProbe.ts';
 import {
   STRESS_BARTENDERS,
   STRESS_GUESTS,
@@ -145,5 +152,116 @@ describe('validityVerdict', () => {
       verdict({ guests: 18, bartenders: 7, queues: 2 }),
     ];
     for (const reason of reasons) expect(reason.length).toBeLessThanOrEqual(36);
+  });
+});
+
+/**
+ * A `FrameReport` with the duty cycle set and everything else inert.
+ *
+ * `busyPercent` is derived from the other two rather than passed in, exactly as
+ * `FrameProbe.report` derives it, so a test cannot assert against an internally
+ * inconsistent report that the real probe could never produce.
+ */
+function report(busyMs: number, wallMs: number): FrameReport {
+  const busyMsPerSecond = wallMs > 0 ? (busyMs / wallMs) * 1000 : 0;
+  const phase = { avgMs: 0, p95Ms: 0, maxMs: 0 };
+  return {
+    frames: 0,
+    windowFrames: 0,
+    avgFrameMs: 0,
+    p95FrameMs: 0,
+    maxFrameMs: 0,
+    estimatedFps: 0,
+    overBudgetPercent: 0,
+    phases: { sim: phase, scene: phase, publish: phase, gpu: phase },
+    busyMs,
+    wallMs,
+    busyMsPerSecond,
+    busyPercent: busyMsPerSecond / 10,
+  };
+}
+
+describe('createWindowFreeze', () => {
+  it('reads the live figures while the window is open', () => {
+    let live = report(500, 10_000);
+    const freeze = createWindowFreeze(() => live);
+
+    expect(freeze.frozen).toBe(false);
+    expect(freeze.instant(10_000)).toBe(10_000);
+    expect(freeze.frames().wallMs).toBe(10_000);
+
+    live = report(1_000, 20_000);
+    expect(freeze.frames().wallMs).toBe(20_000);
+  });
+
+  it('latches the duty cycle at the freeze, undiluted by the idle tail', () => {
+    // The real numbers from DUB-10's own verification paste, which is what
+    // found this: a 60 s window reported `elapsed_s 60.0` beside
+    // `busy_window_s 67.1`, so the `busy_pct 1.3` that was copied described
+    // 67.1 s — the last 7 of them a frozen, idle panel. Idle time dilutes the
+    // duty cycle *downward*, which made the one figure DUB-6 gates on read
+    // lenient in proportion to how slow the tester was to tap "Copy report".
+    let live = report(1_500, 60_000);
+    const freeze = createWindowFreeze(() => live);
+
+    freeze.freeze(60_000);
+
+    // Seven seconds of the game still rendering while nobody is looking.
+    live = report(1_520, 67_100);
+
+    expect(freeze.frozen).toBe(true);
+    expect(freeze.instant(67_100)).toBe(60_000);
+    expect(freeze.frames().wallMs).toBe(60_000);
+    expect(freeze.frames().busyPercent).toBeCloseTo(2.5, 6);
+    expect(freeze.frames().busyMsPerSecond).toBeCloseTo(25, 6);
+
+    // What the bug printed instead, for the record: the same work over a 12%
+    // longer window.
+    expect(live.busyPercent).toBeLessThan(freeze.frames().busyPercent);
+  });
+
+  it('gives a second tap on “Copy report” the first tap’s numbers', () => {
+    let live = report(1_500, 26_000);
+    const freeze = createWindowFreeze(() => live);
+
+    freeze.freeze(26_000);
+    const first = freeze.frames();
+
+    live = report(4_000, 90_000);
+    freeze.freeze(90_000);
+
+    expect(freeze.instant(90_000)).toBe(26_000);
+    expect(freeze.frames()).toBe(first);
+  });
+
+  it('goes back to live when “Start 60 s measurement” reopens the window', () => {
+    let live = report(1_500, 60_000);
+    const freeze = createWindowFreeze(() => live);
+
+    freeze.freeze(60_000);
+    freeze.thaw();
+    live = report(10, 200);
+
+    expect(freeze.frozen).toBe(false);
+    expect(freeze.instant(61_000)).toBe(61_000);
+    expect(freeze.frames().wallMs).toBe(200);
+  });
+
+  it('reads the frames once per freeze, not once per repaint', () => {
+    // Not a performance assertion — a correctness one. A latch that re-read on
+    // every access would be the original defect with more code, and the panel
+    // repaints five times a second for as long as it is left on screen.
+    let reads = 0;
+    const freeze = createWindowFreeze(() => {
+      reads += 1;
+      return report(1_500, 60_000);
+    });
+
+    freeze.freeze(60_000);
+    freeze.frames();
+    freeze.frames();
+    freeze.frames();
+
+    expect(reads).toBe(1);
   });
 });
