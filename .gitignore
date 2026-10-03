@@ -10,3 +10,7 @@ npm-debug.log*
 
 # Local Claude Code harness settings, not project config
 .claude/settings.local.json
+
+# Screenshot output from `npm run shots`. Regenerable, 2 MB of binaries, and
+# the design review happens on the ticket where they are attached — not here.
+screenshots/
