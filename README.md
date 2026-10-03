@@ -317,10 +317,12 @@ clear of everything below.
 ### Fields
 
 QA reads these off the overlay for the DUB-6 C1 frame-budget numbers. **The
-names are a contract: do not rename one without saying so on DUB-6.**
+names are a contract: do not rename one without saying so on DUB-6.** Fields
+may be *added*; an existing one keeps both its name and its meaning.
 
 | field                 | meaning                                                              |
 | --------------------- | -------------------------------------------------------------------- |
+| **`valid`**           | **`yes`, or `no — <reason>`: whether this report can be used at all. First row. See "The `valid` row"** |
 | `build`               | short commit SHA, substituted at build time; `dev` on the dev server  |
 | `scene`               | `normal`, or `stress` under `stress=1`                                |
 | `state`               | `live`, or `FROZEN` after a 60 s run or a copy                        |
@@ -343,12 +345,79 @@ names are a contract: do not rename one without saying so on DUB-6.**
 | `dpr`                 | `window.devicePixelRatio`                                             |
 | `canvas_px`           | canvas backing-store size. A 3x phone draws ~9x the pixels of a 1x one |
 | `canvas_css`          | canvas CSS size                                                       |
+| `viewport_css`        | `window.innerWidth`x`window.innerHeight` — the window, not the canvas  |
+| `touch_points`        | `navigator.maxTouchPoints`. 0 on a desktop mouse, 5 on an iPhone       |
 | `heap_mb`             | `performance.memory` — **Chrome only, `n/a` on Safari**, never guessed |
 | `elapsed_s`           | time in the current measurement window                                |
-| `window_frames`       | frames sampled in the window                                          |
+| `hidden_breaks`       | times the page became hidden while sampling. **Any value > 0 invalidates the run** |
+| `hidden_s`            | total time the page spent hidden during the window                     |
+| `wake_lock`           | `held`, `refused` or `unavailable` — see "Keeping the screen awake"    |
+| `window_frames`       | frames sampled in the window (frames spanning a hidden gap are not sampled) |
 | `sim_ms_p95` …        | per-system p95 from `FrameProbe` — which system spent the budget      |
+| `ua`                  | `navigator.userAgent`, verbatim. Last line, full width, soft-wrapped   |
 
-Four of these need a note.
+Six of these need a note.
+
+### The `valid` row
+
+**If `valid` is not `yes`, the rest of the report is not a measurement and must
+not be quoted as one.** It is the first line, and when it fails it carries the
+shortest true reason:
+
+```
+valid               no — window was hidden for 8.8 s
+```
+
+`valid yes` requires all four of these. The first one that fails is the one
+printed, because fixing it means re-running anyway:
+
+| condition                                       | reason when it fails              |
+| ----------------------------------------------- | --------------------------------- |
+| a measurement was armed with the button         | `no measurement started`          |
+| the full 60 s elapsed and the panel froze itself | `copied at 26 s of 60 s`, or `still running, 26 s of 60 s` while it is counting |
+| `hidden_breaks == 0`                            | `window was hidden for 8.8 s`     |
+| `stress=1`, and the scene really was 25 / 9 / 3  | `scene was normal, not stress`, or `scene was 18/9/3, not 25/9/3` |
+
+The panel is outlined in red whenever the verdict is `no`, so it reads from
+across a table without anyone parsing 36 rows of numbers.
+
+This exists because the first report off the published build was unusable in
+two ways and said neither. It had been taken on desktop Chrome rather than an
+iPhone — inferable only from `canvas_css 1512x739` and the presence of
+`heap_mb` — and the window had been hidden mid-run, which `rAF` turns into a
+single enormous frame: `frame_ms_max 8750` and `frame_ms_mean 23.11` over 26 s,
+about twelve frames accounting for 15 of the 26 seconds. Both are now caught at
+the instrument. Hidden periods are counted and the frame that spans one is
+**discarded**, not averaged into `frame_ms_mean`, `frame_ms_max` or
+`fps_p1_worst` — and the window is then marked invalid, because a 60 s run
+missing 9 of its seconds is not a 60 s run.
+
+Copying before the minute is up is still allowed and still useful. The copied
+text just says `valid no — copied at N s of 60 s`, which is the truth about it.
+
+Note the last condition: **`?debug=1` without `stress=1` can never read
+`valid yes`.** That is deliberate. The overlay is still a perfectly good
+read-out during normal play, but a C1 frame budget is only a C1 frame budget if
+it was taken on the C1 floor, and "roughly that busy" is not a scene two people
+can measure the same way twice.
+
+The verdict rules are the one part of the overlay a test can reach without a
+WebGL context — `src/debug/overlay.test.ts` asserts each reason string
+literally, including the precedence order.
+
+### Keeping the screen awake
+
+"Start 60 s measurement" asks for a `'screen'` wake lock when
+`navigator.wakeLock` exists, and releases it when the window freezes or the
+overlay is destroyed. `wake_lock` reports what happened: `held`, `refused`, or
+`unavailable` on a browser without the API.
+
+This is a mitigation, not a check. The protocol for a device measurement is
+"put the phone down and leave it", and a phone left alone locks its screen —
+which is precisely the hidden break above. A refused or unavailable lock
+therefore does **not** invalidate a run; `hidden_breaks` already catches the
+failure directly, and treating the mitigation as the check would make a correct
+run on a browser without the API unreportable.
 
 **`busy_pct` is the one to gate on, not `fps`.** QA measured the container
 frame rate moving 3.4x on `deviceScaleFactor` alone with the build held
@@ -387,12 +456,21 @@ reason the breakdown is on the overlay rather than folded into one number.
 
 ### The two buttons
 
-- **Start 60 s measurement** — resets the window, collects for 60 s, then
-  freezes so the numbers can be read with the phone on the table.
+- **Start 60 s measurement** — resets the window, asks for a screen wake lock,
+  collects for 60 s, then freezes so the numbers can be read with the phone on
+  the table. It also resets `hidden_breaks`, `hidden_s` and the duty-cycle
+  window: those belong to the measurement, not to the page.
 - **Copy report** — writes the whole block to the clipboard, inside the tap
   handler (iOS Safari refuses a clipboard write after an `await`). It also
   freezes the panel and makes the on-screen text selectable, because clipboard
   permission on iOS fails quietly and the fallback has to be the real text.
+  Tapping it before the minute is up is allowed, and the copied text then says
+  `valid no — copied at N s of 60 s`; the report is rebuilt as the panel
+  freezes, so the verdict describes what actually happened to it.
+
+The clipboard gets exactly the three blocks you can see, in the order they are
+on screen: the `valid` row, the two-column grid, and `ua`. What you read is
+what you paste.
 
 ### `stress=1` — the certification scene
 
@@ -441,9 +519,12 @@ returns 201, and the site is enabled.
 
 One wrinkle while the review is in flight: `main` is still the empty initial
 commit, because the game lives in a stack of open PRs. So the workflow also
-deploys `DUB-9-debug-overlay` directly, to give DUB-8 a URL before the stack
-merges. **That branch trigger is scaffolding and should be deleted at merge** —
-it is marked as such in the workflow.
+deploys the head of that stack — currently `DUB-10-overlay-validity` — directly,
+to give DUB-8 a URL before the stack merges. **That branch trigger is
+scaffolding and should be deleted at merge** — it is marked as such in the
+workflow. It is a single branch rather than a list on purpose: with two preview
+sources the published URL would show whichever was pushed last, and `build` is
+how anyone reading a report knows which code produced it.
 
 `vite.config.ts` sets `base` to `/club-empire/` for builds only, so the dev
 server keeps serving from `/`. Override with `CLUB_EMPIRE_BASE` to host
