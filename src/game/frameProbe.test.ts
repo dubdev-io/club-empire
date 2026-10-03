@@ -40,11 +40,14 @@ describe('FrameProbe duty cycle', () => {
     for (let i = 0; i < 60; i += 1) runFrame(probe, 3, 1000 / 60);
 
     const report = probe.report();
-    // The window ends at the last `endFrame`, not at the last frame boundary,
-    // so the denominator is 59 intervals plus the final 3 ms of work.
-    expect(report.wallMs).toBeCloseTo((59 * 1000) / 60 + 3, 6);
-    expect(report.busyMs).toBeCloseTo(180, 6);
-    expect(report.busyPercent).toBeCloseTo(18.3, 1);
+    // The window ends at the last `endFrame`, not at the frame boundary after
+    // it, so the denominator is 59 intervals plus the final 3 ms of work —
+    // 986.3 ms, not a round second. That edge is worth 0.25 points here and
+    // 0.01 over the 60 s the overlay actually measures, so it is left in
+    // rather than papered over with a rounded-up denominator.
+    expect(report.wallMs).toBeCloseTo((59 * 1000) / 60 + 3, 3);
+    expect(report.busyMs).toBeCloseTo(180, 3);
+    expect(report.busyPercent).toBeCloseTo(18.25, 1);
     expect(report.busyMsPerSecond).toBeCloseTo(report.busyPercent * 10, 6);
   });
 
@@ -53,14 +56,17 @@ describe('FrameProbe duty cycle', () => {
     // halving the frame rate doubles the work per frame while leaving the work
     // per second alone. `avgFrameMs` moves, the duty cycle must not — that is
     // the whole reason DUB-6 gates on this field instead of on frame time.
+    // Twelve seconds of wall clock each, so the one-frame edge on the
+    // denominator is well under the tolerance and what is left is the
+    // invariant itself rather than an artefact of a short run.
     const fast = new FrameProbe();
     fast.reset();
-    for (let i = 0; i < 120; i += 1) runFrame(fast, 2, 10);
+    for (let i = 0; i < 1200; i += 1) runFrame(fast, 2, 10);
 
     clock = 0;
     const slow = new FrameProbe();
     slow.reset();
-    for (let i = 0; i < 60; i += 1) runFrame(slow, 4, 20);
+    for (let i = 0; i < 600; i += 1) runFrame(slow, 4, 20);
 
     const a = fast.report();
     const b = slow.report();

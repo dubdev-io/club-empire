@@ -230,23 +230,26 @@ Production JS, gzipped (`npm run build`):
 
 | chunk            | raw        | gzipped    | fetched on a normal load |
 | ---------------- | ---------- | ---------- | ------------------------ |
-| pixi             | 511.7 kB   | 143.7 kB   | yes                      |
-| react            | 218.8 kB   | 67.5 kB    | yes                      |
-| app              | 63.0 kB    | 19.4 kB    | yes                      |
-| rolldown-runtime | 0.7 kB     | 0.5 kB     | yes                      |
-| CSS              | 17.4 kB    | 3.6 kB     | yes                      |
+| pixi             | 511.7 kB   | 145.4 kB   | yes                      |
+| react            | 218.8 kB   | 68.3 kB    | yes                      |
+| app              | 66.1 kB    | 20.5 kB    | yes                      |
+| rolldown-runtime | 0.7 kB     | 0.4 kB     | yes                      |
+| CSS              | 17.5 kB    | 3.6 kB     | yes                      |
 | index.html       | 2.9 kB     | 1.3 kB     | yes                      |
-| **normal load**  | **815 kB** | **236 kB** |                          |
-| overlay          | 9.0 kB     | 3.8 kB     | **no — `?debug=1` only** |
+| **normal load**  | **818 kB** | **239 kB** |                          |
+| overlay          | 8.1 kB     | 3.6 kB     | **no — `?debug=1` only** |
 
-**236 kB transferred against the 4 MB hard ceiling** — 5.8% of it. The only
+**239 kB transferred against the 4 MB hard ceiling** — 5.8% of it. The only
 file in `dist/` that is not code is a 237-byte favicon: every sprite is a
 PixiJS path rasterised at boot and every sound is a Web Audio oscillator, so
 the ~660 kB atlas and ~720 kB audio the brief budgeted are both unspent. See
 `CREDITS.md`.
 
 The `overlay` chunk is not in the `modulepreload` list and is never requested
-without the flag; see the next section.
+without the flag. Checked rather than assumed: `dist/` served under
+`/club-empire/` and loaded in Chrome at 390x844, the request log for a
+flag-free load contains no `overlay-*.js` and `document.querySelectorAll('.ce-debug')`
+is empty. See the next section.
 
 `npm run build` emits **no sourcemaps**: they were 3.4 MB of host payload and
 published readable source for no benefit to the player. Use `npm run build:debug`
@@ -283,7 +286,7 @@ into production, and they are the ones QA and the owner use.
 | --- | --- | --- |
 | 1 — economy within ±20% | 13/13 rows | `npm run sim:autobuy` |
 | 8 — frame budget | CPU-side 0.73 ms avg / 1.21 ms p95 of 16.6 ms, at 30 guests + 9 bartenders + 4 queues | `npm run measure:frames` |
-| 9 — ≤ 4 MB transferred | 236 kB gzipped | `npm run build` |
+| 9 — ≤ 4 MB transferred | 239 kB gzipped | `npm run build` |
 | 12 — asset licences | zero third-party assets | `CREDITS.md` |
 
 Criterion 8's **GPU side is unverified**: this container has no GPU, WebGL runs
@@ -327,11 +330,16 @@ names are a contract: do not rename one without saying so on DUB-6.**
 | `frame_ms_mean`       | mean wall time between frames, over the window                        |
 | `frame_ms_max`        | the single worst frame in the window                                  |
 | `refresh_cap_hz`      | highest `fps` seen — says whether iOS capped at 120, 60, or 30 (Low Power Mode) |
+| **`busy_pct`**        | **main-thread busy ms per second of wall clock, as a percentage. DUB-6's gating figure** |
+| `busy_ms_per_s`       | the same figure unnormalised, for arithmetic                          |
+| `busy_window_s`       | wall clock the duty cycle was measured over                           |
 | `draw_calls`          | `gl.draw*` calls in the last frame; `n/a` if the context is not WebGL |
 | `guests_rendered`     | dancers plus every queued guest. §11 caps this at 30                  |
 | `bartenders_rendered` | visible bartenders — one per owned lane on an open station            |
 | `queues_rendered`     | queues with at least one guest: the three bars and the door           |
-| `particles_rendered`  | transient effect sprites — cash bubbles, VIP rings, the hint ring     |
+| `particles_rendered`  | `particles_canvas` + `particles_dom`. §11 caps this at 60             |
+| `particles_canvas`    | transient Pixi sprites — cash bubbles, VIP rings, the hint ring       |
+| `particles_dom`       | confetti `<span>`s in the React layer. Max 12, 0 under reduced motion |
 | `dpr`                 | `window.devicePixelRatio`                                             |
 | `canvas_px`           | canvas backing-store size. A 3x phone draws ~9x the pixels of a 1x one |
 | `canvas_css`          | canvas CSS size                                                       |
@@ -340,7 +348,22 @@ names are a contract: do not rename one without saying so on DUB-6.**
 | `window_frames`       | frames sampled in the window                                          |
 | `sim_ms_p95` …        | per-system p95 from `FrameProbe` — which system spent the budget      |
 
-Two of these need a note.
+Four of these need a note.
+
+**`busy_pct` is the one to gate on, not `fps`.** QA measured the container
+frame rate moving 3.4x on `deviceScaleFactor` alone with the build held
+constant, so it cannot carry a build-to-build regression signal. The sim is
+fixed-step at 10 Hz with catch-up, so work per frame is proportional to frame
+duration by construction and work per wall-clock second is the invariant. DUB-6
+gates at **≤ 18 % at 1x and ≤ 72 % at 4x**, with a 1.3x regression gate on the
+duty cycle. `fps` stays on the overlay because on the owner's iPhone it is a
+real device number and that is the whole point of DUB-9 — but it only means
+something read next to `dpr` and `canvas_px`.
+
+"Start 60 s measurement" resets the duty-cycle window too, so `busy_pct` and
+`fps` in one report always describe the same stretch of time. The window closes
+at the last rendered frame rather than at the moment you read it, so the figure
+does not drift while the panel sits frozen.
 
 `dpr` and `canvas_px` will disagree on a 3x phone, and that is correct:
 `createStage` caps the renderer resolution at 2 (see "Performance rules this
@@ -349,10 +372,18 @@ code follows"). On a 390x844 iPhone at `dpr 3.00` the backing store is
 not 9x. Both numbers are on the overlay precisely so a reader can see the cap
 rather than assume it.
 
-`particles_rendered` tops out at about 4, because Phase 1 has **no particle
-emitter** — the only transient sprites are the cash bubbles, their VIP rings and
-the hint ring. §11's 60-particle cap is unused today. The field is there so the
-number is visible rather than assumed.
+**`particles_rendered` is split across two renderers, which is why there are
+three fields.** Phase 1 has no Pixi particle emitter: `particles_canvas` is
+just the cash bubbles, their VIP rings and the hint ring, and tops out at about
+4. The star-celebration confetti is not canvas at all — it is twelve
+CSS-animated `<span>`s in the React overlay layer, so `particles_dom` is what
+counts it and a GL-side probe reads zero for it even mid-celebration. Checking
+§11's 60-particle cap against the canvas alone is a false pass, which is
+exactly what happened on DUB-6. Both halves are counted, never estimated,
+because QA cross-checks these against an independent GL index-count probe.
+
+The day a Pixi emitter *is* added, only `particles_canvas` moves — that is the
+reason the breakdown is on the overlay rather than folded into one number.
 
 ### The two buttons
 
@@ -377,22 +408,43 @@ reads or writes `localStorage`** — opening it on the phone you also play on
 cannot cost you your club.
 
 The club state and the crowd arithmetic are covered by
-`src/game/stressScene.test.ts`. What that cannot cover is the sprite side:
-`ClubScene` needs a WebGL context and the tests run on node. The check that the
-scene honours the pin is reading `guests_rendered` / `bartenders_rendered` /
-`queues_rendered` off the overlay on the device — a known gap, not an assumed
-pass.
+`src/game/stressScene.test.ts`. The sprite side cannot be: `ClubScene` needs a
+WebGL context and the tests run on node. So it was checked by loading the
+**built** bundle twice in Chrome at 390x844 and reading the overlay back:
+
+```
+guests_rendered 25   bartenders_rendered 9   queues_rendered 3   draw_calls 9
+```
+
+— identical on both loads, which is the determinism the preset is for. 9 draw
+calls for a late-game floor is the batching holding: every sprite shares one
+generated texture. The one number that still has to come off real silicon is
+the frame rate itself.
 
 ## Publishing
 
-`.github/workflows/pages.yml` builds `main` and deploys `dist/` to GitHub Pages.
-At the time it was committed, **Pages is refused on this repository**:
+`.github/workflows/pages.yml` runs `npm ci`, typecheck, tests and build, then
+deploys `dist/` to GitHub Pages.
+
+**https://dubdev-io.github.io/club-empire/**
 
 ```
-POST /repos/dubdev-io/club-empire/pages  ->  422
-{"message":"Your current plan does not support GitHub Pages for this repository."}
+https://dubdev-io.github.io/club-empire/?debug=1            # the overlay
+https://dubdev-io.github.io/club-empire/?debug=1&stress=1   # the C1 scene
 ```
 
-The repo is private and the org's plan only allows Pages on public repositories.
-The workflow is committed ready to run and needs no edit once Pages is enabled;
-the hosting decision belongs to the owner (DUB-9).
+Pages was refused when the workflow was first written — `POST /repos/dubdev-io/club-empire/pages`
+returned `422 {"message":"Your current plan does not support GitHub Pages for
+this repository."}`, because the repo was private and the org's plan allows
+Pages on public repos only. The repo has since been made public, the same call
+returns 201, and the site is enabled.
+
+One wrinkle while the review is in flight: `main` is still the empty initial
+commit, because the game lives in a stack of open PRs. So the workflow also
+deploys `DUB-9-debug-overlay` directly, to give DUB-8 a URL before the stack
+merges. **That branch trigger is scaffolding and should be deleted at merge** —
+it is marked as such in the workflow.
+
+`vite.config.ts` sets `base` to `/club-empire/` for builds only, so the dev
+server keeps serving from `/`. Override with `CLUB_EMPIRE_BASE` to host
+somewhere else.

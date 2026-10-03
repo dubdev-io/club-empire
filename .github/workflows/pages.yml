@@ -5,25 +5,36 @@
 # someone's laptop. Nothing here costs money — GitHub Pages and GitHub-hosted
 # runners only.
 #
-# Status at the time this landed: **Pages is refused on this repository.**
+# Pages history on this repo, because it changed under this ticket:
+#
+# When the workflow was first committed, Pages was refused —
 #
 #   POST /repos/dubdev-io/club-empire/pages  ->  HTTP 422
 #   {"message":"Your current plan does not support GitHub Pages for this
 #    repository.", "status":"422"}
 #
-# The repo is private and the org is on a plan where Pages is a public-repo-only
-# feature. Changing the repository's visibility is explicitly out of scope for
-# this ticket, so the workflow is committed ready to run and the hosting
-# decision sits with the owner (see DUB-9). The moment Pages is enabled — by
-# making the repo public, or on a plan that allows private Pages — this runs as
-# it stands, with no edit.
+# — because the repo was private and the org's plan allows Pages on public
+# repos only. The repo has since been made public (not by this ticket; changing
+# visibility was explicitly out of scope), the same call now returns 201, and
+# the site is live at https://dubdev-io.github.io/club-empire/.
 name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
-  # So the first deploy can be kicked off by hand the moment Pages is enabled,
-  # without waiting for the next commit to main.
+    branches:
+      - main
+      # Pre-merge preview. `main` is still the empty initial commit — the whole
+      # game sits in a stack of open PRs (DUB-3 -> DUB-4 -> DUB-5 -> DUB-9) —
+      # so deploying `main` today publishes nothing, and DUB-8 cannot start
+      # without a URL on a phone. This branch is therefore deployed directly so
+      # the owner has something to open.
+      #
+      # **Remove this line when the stack merges.** It exists so a measurement
+      # can happen before the review finishes, not as a permanent second
+      # deploy source. The `github-pages` environment needs a matching
+      # deployment branch policy for it to run at all.
+      - DUB-9-debug-overlay
+  # So a deploy can be kicked off by hand without waiting for the next commit.
   workflow_dispatch:
 
 permissions:
