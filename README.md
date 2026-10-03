@@ -1,9 +1,22 @@
-# Club Empire — technical shell
+# Club Empire
 
-Portrait browser idle game: a nightclub tycoon. **This repository currently
-contains no gameplay.** It is the technical foundation the game loop will run
-on — canvas, UI layering, a frame-rate-independent simulation tick, versioned
-saves, and offline time. The design brief (DUB-2) owns the economy formulas.
+Portrait browser idle game: a nightclub tycoon. Phase 1 is playable — one club,
+three bar stations, serving lanes, the door, cash bubbles, Last Call, queues,
+save/load and offline earnings.
+
+**The one rule the whole design rests on:**
+
+```
+income/s = SUM over stations [ min(guests routed to it, lanes / serveTime) * drinkPrice(level) ]
+```
+
+Station level buys cash per guest; lanes and the door buy guests per second. The
+`min()` couples them, and when it binds a **queue** appears on the floor — at
+the bar, or at the door. That queue is the entire tutorial: it tells the player
+which half of the product to spend on without a word of text. There is exactly
+one implementation of the rule (`computeFlow` in `src/config/economy.ts`), and
+the queues drawn on the canvas are read off it rather than approximated, so the
+picture and the economy cannot disagree.
 
 ## Install, run, build
 
@@ -31,6 +44,32 @@ npm run lint        # eslint, type-aware
 npm test            # vitest run
 ```
 
+Verification tools:
+
+```bash
+npm run sim:economy      # the economy MODEL against the §4.4 table (DUB-4)
+npm run sim:autobuy      # the SHIPPING game against the same table
+node tools/autobuy.ts --tap   # ...with a player collecting every bubble
+
+npm run shots            # all ten states at 390x844 and 1440x900
+npm run measure:frames   # per-system frame time at the §11 entity ceiling
+```
+
+`sim:economy` and `sim:autobuy` read the same table from `src/config/pacing.ts`.
+The first runs a closed-form model, the second runs the real `ClubState` through
+the real purchase functions — so a divergence between the signed-off model and
+the shipping game shows up as two different sets of numbers rather than as two
+tools that both pass.
+
+`shots` and `measure:frames` need a dev server and a headless Chrome with remote
+debugging:
+
+```bash
+npm run dev &
+google-chrome --headless=new --remote-debugging-port=9222 --no-sandbox \
+  --enable-unsafe-swiftshader about:blank &
+```
+
 The production build is static files in `dist/`. There is no backend, no
 server and no database.
 
@@ -48,25 +87,38 @@ src/
   main.tsx              entry: mounts React, then boots the Pixi runtime
   config/
     economy.ts          ← THE ONE CONFIG MODULE: every balance number, and the min()
+    pacing.ts           the §4.4 table, shared by both verification tools
   game/
     runtime.ts          ← the one requestAnimationFrame loop lives here
+    audio.ts            every sound, synthesised — no audio files
+    frameProbe.ts       per-system frame timing, allocation-free
   sim/                  pure logic, no DOM, no Pixi — all of it unit-tested
     constants.ts        tick rate, catch-up clamp, design size, autosave cadence
     fixedStepLoop.ts    ← THE SIMULATION TICK
-    economy.ts          placeholder economy state and its one-tick step
+    clubState.ts        ← THE CLUB: mutable state, purchases, bubbles, Last Call
     offline.ts          elapsed-time-since-last-seen, clamped and sign-safe
+    offlineEarnings.ts  the §5 rule: 50%, capped at 10 min, no doubling
   save/
     schema.ts           save versions, validation, migration chain
     storage.ts          localStorage read/write that never throws
   state/
-    store.ts            Zustand store — the UI's read model
+    store.ts            Zustand store — the UI's read model, split fast/structural
   render/
     stage.ts            Pixi app, design-size scaling, safe-area, resize
-    clubFloor.ts        placeholder scene; pooled, allocation-free
-    textures.ts         programmer art generated at boot (no asset files)
+    layout.ts           where everything is, in 390x844 design space
+    clubScene.ts        ← THE FLOOR: pooled, allocation-free, reads ClubFlow
+    palette.ts          the §10 tokens as ints, checked against tokens.css
+    textures.ts         every sprite, generated at boot — no asset files
     safeArea.ts         reads env(safe-area-inset-*) as numbers
-  ui/                   React: every panel, counter and button is DOM
-  styles/global.css     layering, safe-area variables, mobile scroll locks
+  ui/                   React: every panel, counter, sheet and card is DOM
+  styles/
+    tokens.css          ← THE §10 DESIGN TOKENS. No colour literal lives elsewhere
+    global.css          layering, safe-area variables, mobile scroll locks
+tools/
+  economy-sim.ts        the economy model vs the §4.4 table
+  autobuy.ts            the shipping game vs the §4.4 table (criterion 1)
+  screenshots.ts        all ten states, both viewports, over CDP
+  frametime.ts          per-system frame time at the §11 ceiling (criterion 8)
 ```
 
 ## Where the balance numbers live
@@ -167,24 +219,55 @@ convert time into money; that formula belongs to the design brief.
 
 Production JS, gzipped (`npm run build`):
 
-| chunk           | raw       | gzipped   |
-| --------------- | --------- | --------- |
-| pixi            | 511.7 kB  | 145.4 kB  |
-| react           | 218.9 kB  | 68.3 kB   |
-| app             | 13.1 kB   | 5.1 kB    |
-| rolldown-runtime| 0.7 kB    | 0.4 kB    |
-| **total JS**    | **744 kB**| **219 kB**|
+| chunk            | raw        | gzipped    |
+| ---------------- | ---------- | ---------- |
+| pixi             | 511.7 kB   | 143.7 kB   |
+| react            | 218.8 kB   | 67.5 kB    |
+| app              | 62.5 kB    | 19.2 kB    |
+| rolldown-runtime | 0.7 kB     | 0.5 kB     |
+| CSS              | 17.4 kB    | 3.6 kB     |
+| index.html       | 2.9 kB     | 1.3 kB     |
+| **total**        | **814 kB** | **236 kB** |
 
-Plus 2.3 kB CSS (0.95 kB gzipped) and a 0.2 kB favicon. Budget for this stage is
-300 kB gzipped. The only asset file is the favicon — the placeholder art is
-generated at runtime.
+**236 kB transferred against the 4 MB hard ceiling** — 5.8% of it. The only
+file in `dist/` that is not code is a 237-byte favicon: every sprite is a
+PixiJS path rasterised at boot and every sound is a Web Audio oscillator, so
+the ~660 kB atlas and ~720 kB audio the brief budgeted are both unspent. See
+`CREDITS.md`.
 
 `npm run build` emits **no sourcemaps**: they were 3.4 MB of host payload and
 published readable source for no benefit to the player. Use `npm run build:debug`
 (`CLUB_EMPIRE_SOURCEMAP=true`) when you need a readable stack trace off a real
 device; that build is ~4.0 MB on disk and must not be the one that gets hosted.
 
-## Dev-only helper
+## Dev-only helpers
 
-In a dev build, `window.__clubDebug()` returns the current stage layout
-(screen size, resolution, world transform). It is stripped from production.
+Stripped from the production bundle by `import.meta.env.DEV`, so the shipping
+game has no way to set its own cash.
+
+| Call | What it does |
+| --- | --- |
+| `window.__clubDebug()` | Current stage layout: screen size, resolution, world transform |
+| `window.__club.state()` | The live `ClubState` |
+| `window.__club.frames()` | Per-system frame-time distribution (p95, not mean) |
+| `window.__club.benchTick()` | Isolated cost of one sim tick and one scene tick |
+| `window.__club.stress()` | Pin the scene at the §11 ceiling: 30 guests, 9 bartenders, every queue full |
+| `window.__club.autoBuy()` | Buy the cheapest purchase as soon as it is affordable |
+| `window.__club.buyAll()` | Jump straight to full build-out, through the real purchase functions |
+| `window.__club.floodDoor()` | Raise the Door without lanes, to force the queue-overflow state |
+| `window.__club.grant(n)` | Add cash |
+| `window.__clubStore` | The Zustand store, for driving UI states by hand |
+| `?noboot=1` | Load the page without starting the game, so storage can be seeded |
+
+## Measured against the acceptance criteria
+
+| Criterion | Measured | How |
+| --- | --- | --- |
+| 1 — economy within ±20% | 13/13 rows | `npm run sim:autobuy` |
+| 8 — frame budget | CPU-side 0.73 ms avg / 1.21 ms p95 of 16.6 ms, at 30 guests + 9 bartenders + 4 queues | `npm run measure:frames` |
+| 9 — ≤ 4 MB transferred | 236 kB gzipped | `npm run build` |
+| 12 — asset licences | zero third-party assets | `CREDITS.md` |
+
+Criterion 8's **GPU side is unverified**: this container has no GPU, WebGL runs
+on SwiftShader, and no honest fps number for a Pixel 6a can come from here. The
+CPU-side figure is the half that does transfer.

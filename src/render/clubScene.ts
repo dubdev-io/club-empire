@@ -353,6 +353,53 @@ export class ClubScene {
     this.syncProgress();
   }
 
+  /**
+   * Force the §11 worst case: every guest sprite live, every queue full.
+   *
+   * Acceptance criterion 8 is specified at "25 guests, 9 bartenders, 3 queues",
+   * and normal play rarely reaches it — a well-built club has short queues by
+   * definition. Measuring the budget at a state the player never sees would be
+   * measuring the wrong thing in the easy direction, so this pins the scene at
+   * the ceiling the design permits and leaves it there.
+   *
+   * Called only from the dev frame-time hook. It overrides what `syncProgress`
+   * computed, so any purchase afterwards resets it.
+   */
+  stressTest(): { guests: number; bartenders: number; queues: number } {
+    let queued = 0;
+    let queues = 0;
+
+    for (const art of this.stations) {
+      let any = false;
+      for (const pair of art.queue) {
+        pair.body.visible = true;
+        pair.head.visible = true;
+        queued += 1;
+        any = true;
+      }
+      if (any) queues += 1;
+    }
+    for (const pair of this.doorQueue) {
+      pair.body.visible = true;
+      pair.head.visible = true;
+      queued += 1;
+    }
+
+    // Dancers take what the queues left, exactly as `syncProgress` does. The
+    // point is to pin the scene at the §11 ceiling of 30 rendered guests, not
+    // to exceed it — a frame time measured at 55 guests would be measuring a
+    // state the game is not allowed to reach.
+    this.activeDancers = MAX_RENDERED_GUESTS;
+    this.setDancerCount(Math.max(0, MAX_RENDERED_GUESTS - queued));
+
+    let bartenders = 0;
+    for (const art of this.stations) {
+      for (const pair of art.bartenders) if (pair.body.visible) bartenders += 1;
+    }
+
+    return { guests: queued + this.activeDancers, bartenders, queues };
+  }
+
   setReducedMotion(reduced: boolean): void {
     this.reducedMotion = reduced;
     if (reduced) {

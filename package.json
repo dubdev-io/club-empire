@@ -14,7 +14,8 @@
     "test": "vitest run",
     "sim:economy": "node tools/economy-sim.ts",
     "sim:autobuy": "node tools/autobuy.ts",
-    "shots": "node tools/screenshots.ts"
+    "shots": "node tools/screenshots.ts",
+    "measure:frames": "node tools/frametime.ts"
   },
   "dependencies": {
     "pixi.js": "8.22.0",

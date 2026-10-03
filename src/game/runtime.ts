@@ -501,7 +501,15 @@ export async function startGame(parent: HTMLElement): Promise<GameRuntime> {
   rafHandle = requestAnimationFrame(frame);
 
   if (import.meta.env.DEV) {
-    installDevHooks({ club, loop, probe, afterPurchase, publishStructure, publishFast });
+    installDevHooks({
+      club,
+      loop,
+      probe,
+      afterPurchase,
+      publishStructure,
+      publishFast,
+      getScene: () => scene,
+    });
   }
 
   return {
@@ -568,8 +576,9 @@ function installDevHooks(deps: {
   afterPurchase: () => void;
   publishStructure: () => void;
   publishFast: (force: boolean) => void;
+  getScene: () => ClubScene | null;
 }): void {
-  const { club, probe, afterPurchase, publishFast } = deps;
+  const { club, probe, afterPurchase, publishFast, getScene } = deps;
   let autoBuyTimer = 0;
 
   (window as unknown as { __club?: unknown }).__club = {
@@ -613,6 +622,67 @@ function installDevHooks(deps: {
       }
       afterPurchase();
       return { purchases: club.purchaseCount, complete: club.derived.complete };
+    },
+
+    /**
+     * Time one simulation tick and one scene tick, in isolation.
+     *
+     * The per-frame `sim` figure from `frames()` is contaminated wherever the
+     * renderer is slow: a 180 ms frame on a software rasteriser hands
+     * `FixedStepLoop.advance` eighteen ticks' worth of time, so the phase
+     * timing reports eighteen ticks and reads as a simulation problem. This
+     * runs the tick in a tight loop with nothing else in the frame, which is a
+     * number that does not depend on how fast the GPU is — and therefore one
+     * that transfers to a real device.
+     */
+    benchTick: (iterations = 200_000) => {
+      const scene = getScene();
+
+      // A warm-up pass, so the figure is of optimised code rather than of the
+      // interpreter's first look at it.
+      for (let i = 0; i < 10_000; i += 1) tickClub(club);
+
+      const simStart = performance.now();
+      for (let i = 0; i < iterations; i += 1) tickClub(club);
+      const simMs = performance.now() - simStart;
+
+      let sceneMs = 0;
+      if (scene !== null) {
+        const sceneIterations = Math.max(1, Math.floor(iterations / 10));
+        for (let i = 0; i < 1_000; i += 1) scene.tick();
+        const sceneStart = performance.now();
+        for (let i = 0; i < sceneIterations; i += 1) scene.tick();
+        sceneMs = ((performance.now() - sceneStart) / sceneIterations) * 1_000_000;
+      }
+
+      return {
+        iterations,
+        simNsPerTick: (simMs / iterations) * 1_000_000,
+        sceneNsPerTick: sceneMs,
+        // What one 60 fps frame's worth of simulation actually costs: at 10 Hz
+        // ticks and 60 fps, a frame runs a tick one time in six.
+        simMsPerFrameAt60: (simMs / iterations) * (10 / 60),
+      };
+    },
+
+    /**
+     * Pin the scene at the §11 ceiling and measure it.
+     *
+     * The honest answer to criterion 8 from a container with no GPU: this is
+     * CPU-side frame time at the worst case the design allows, per system. It
+     * is not an fps figure and must not be reported as one.
+     */
+    stress: () => {
+      creditCash(club, 1e12);
+      for (let guard = 0; guard < 500; guard += 1) {
+        const next = club.derived.nextPurchase;
+        if (next === null) break;
+        if (applyPurchase(club, next) !== 'bought') break;
+      }
+      afterPurchase();
+      const counts = getScene()?.stressTest() ?? null;
+      probe.reset();
+      return counts;
     },
 
     /**
