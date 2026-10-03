@@ -1,7 +1,7 @@
 /**
  * The `?debug=1` frame-rate overlay (DUB-9).
  *
- * This is a measurement instrument, not a feature, and it is built to three
+ * This is a measurement instrument, not a feature, and it is built to five
  * rules that follow from that.
  *
  * **1. It costs nothing when the flag is off.** This module is reached only by
@@ -33,16 +33,56 @@
  * device number and this ticket exists to get one — but it has to be read
  * next to `dpr` and `canvas_px` to mean anything, which is why they are here.
  *
+ * **5. A report that cannot be trusted says so on its first line (DUB-10).**
+ * The first run of this overlay came back from the owner with
+ * `frame_ms_max 8750` and `frame_ms_mean 23.11` over 26 s — the phone had been
+ * put face down, `rAF` had stopped, and the gap had been recorded as one giant
+ * frame. The numbers were wrong and the panel carried on looking complete,
+ * which is rule 3 failing one level up: it was not lying about a field, it was
+ * lying about the report. So the window is now visibility-aware (the frame that
+ * spans a hidden period is discarded, not averaged), and a single `valid` row
+ * states the verdict and the shortest true reason it failed. The device is
+ * printed as facts — `ua`, `viewport_css`, `touch_points` — because the same
+ * report also turned out to be from desktop Chrome, and the only tells were
+ * `canvas_css` and the mere presence of `heap_mb`.
+ *
  * Field names are a contract: QA reads them off this overlay for the DUB-6 C1
  * frame-budget numbers. They are listed in the README and must not be renamed
- * without saying so on DUB-6.
+ * without saying so on DUB-6. New fields may be added; existing ones keep both
+ * their name and their meaning.
  */
 
 import type { GameRuntime } from '../game/runtime.ts';
 import type { RenderCounts } from '../render/clubScene.ts';
 
+/**
+ * The C1 floor the `valid` verdict checks against: 25 guests, 9 bartenders,
+ * 3 queues.
+ *
+ * Written out here rather than imported from `game/stressScene.ts`, which is
+ * where they really live, and that is a deliberate trade rather than an
+ * oversight. `STRESS_BARTENDERS` there is computed — `STATION_DEFS.length *
+ * MAX_LANES` — so with nothing referencing it, Rolldown drops the binding from
+ * the main bundle entirely. A reference from this chunk brings it back, and the
+ * *flag-off* bundle grows by 15 bytes it did not have before. DUB-10's one
+ * hard constraint is that the build behind the published URL stays the Phase 1
+ * review build plus this overlay, and 15 bytes of otherwise-dead constant in
+ * the chunk every player downloads is still not that.
+ *
+ * The coupling is enforced in `overlay.test.ts` instead, which asserts these
+ * three against the real `STRESS_*` constants. The test is not bundled, so it
+ * costs the player nothing, and the day the C1 scene moves, CI says so rather
+ * than the overlay quietly validating against the old floor.
+ */
+export const C1_GUESTS = 25;
+export const C1_BARTENDERS = 9;
+export const C1_QUEUES = 3;
+
 /** Length of the 60 s measurement, in ms. The number DUB-9 asks for. */
 const MEASURE_MS = 60_000;
+
+/** The same length in whole seconds, for the `valid` reason text. */
+const MEASURE_S = MEASURE_MS / 1000;
 
 /**
  * Frame-time samples kept per window.
@@ -82,6 +122,90 @@ interface ChromeMemory {
   readonly usedJSHeapSize: number;
 }
 
+/**
+ * Everything the `valid` verdict is allowed to depend on.
+ *
+ * A plain record rather than the overlay's live closure state, for one reason:
+ * the verdict is the only piece of this module that can be tested without a
+ * WebGL context, a DOM or a frame clock, and it is also the piece most likely
+ * to be read wrong. `vitest` runs on the node environment, so if the rules
+ * lived inside `mountDebugOverlay` they would be checked by eye on a phone —
+ * which is the thing DUB-10 exists to stop doing.
+ */
+export interface MeasurementWindow {
+  /** "Start 60 s measurement" has been tapped at least once. */
+  readonly armed: boolean;
+  /** The full 60 s elapsed and the panel froze itself. */
+  readonly completed: boolean;
+  /** The panel has stopped updating, whether by timeout or by "Copy report". */
+  readonly frozen: boolean;
+  /** Wall clock since the window opened. */
+  readonly elapsedMs: number;
+  /** Hidden periods seen while sampling. */
+  readonly hiddenBreaks: number;
+  /** Total time the page spent hidden during the window. */
+  readonly hiddenMs: number;
+  /** `stress=1` was on the URL. */
+  readonly stress: boolean;
+  /** Worst scene counts seen during the window — see `noteScene`. */
+  readonly guests: number;
+  readonly bartenders: number;
+  readonly queues: number;
+}
+
+/**
+ * The value of the `valid` row: `yes`, or `no — <shortest true reason>`.
+ *
+ * The order of the checks is the order DUB-10 specifies, and it is not
+ * arbitrary — it runs from "there is no measurement here at all" down to "the
+ * measurement is real but the scene was wrong", so the first reason printed is
+ * always the most fundamental thing wrong with the report. Two failures print
+ * one line, because a reader who fixes the first will re-run anyway.
+ *
+ * Note what is deliberately *not* here: `wake_lock`. A refused screen lock is
+ * not a defect in the measurement, only a raised probability of one, and the
+ * defect it raises the probability of (`hidden_breaks`) is already checked
+ * directly. Invalidating on it would make a correct run on a browser without
+ * the API unreportable.
+ */
+export function validityVerdict(measured: MeasurementWindow): string {
+  if (!measured.armed) return 'no — no measurement started';
+
+  if (!measured.completed) {
+    const seconds = Math.round(measured.elapsedMs / 1000);
+    // "copied at" only when it is true. A live panel mid-run has the same
+    // defect — an unfinished window — but nobody has copied anything yet, and
+    // a report that invents an event is the failure this ticket is about.
+    return measured.frozen
+      ? `no — copied at ${seconds} s of ${MEASURE_S} s`
+      : `no — still running, ${seconds} s of ${MEASURE_S} s`;
+  }
+
+  if (measured.hiddenBreaks > 0) {
+    return `no — window was hidden for ${(measured.hiddenMs / 1000).toFixed(1)} s`;
+  }
+
+  // The C1 numbers are only C1 numbers if they were taken on the C1 floor.
+  // `?debug=1` on its own is a useful read-out and an invalid measurement.
+  if (!measured.stress) return 'no — scene was normal, not stress';
+
+  if (
+    measured.guests !== C1_GUESTS ||
+    measured.bartenders !== C1_BARTENDERS ||
+    measured.queues !== C1_QUEUES
+  ) {
+    return (
+      `no — scene was ${measured.guests}/${measured.bartenders}/${measured.queues}, ` +
+      `not ${C1_GUESTS}/${C1_BARTENDERS}/${C1_QUEUES}`
+    );
+  }
+
+  return 'yes';
+}
+
+/** What the screen wake lock did, as reported by `wake_lock`. */
+type WakeLockState = 'held' | 'refused' | 'unavailable';
+
 export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo): DebugOverlay {
   const debug = runtime.debug;
 
@@ -105,7 +229,52 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   let peakFps = 0;
   let status = 'free-running — tap “Start 60 s measurement” to take a reading';
 
+  // --- window integrity (DUB-10) ------------------------------------------
+  /** "Start 60 s measurement" has been tapped at least once. */
+  let armed = false;
+  /** The 60 s ran out and the panel froze itself, rather than being copied early. */
+  let completed = false;
+  /** `performance.now()` at which the window stopped. Null while it is live. */
+  let frozenAt: number | null = null;
+  /** Hidden periods during the current window, and their total duration. */
+  let hiddenBreaks = 0;
+  let hiddenMs = 0;
+  /** `performance.now()` at which the page went hidden; 0 when visible. */
+  let hiddenAt = 0;
+  /**
+   * Set when visibility returns, cleared by the next frame.
+   *
+   * That frame's delta is the length of the hidden period plus a real frame,
+   * which is not a frame time and must not reach `samples`. On the owner's
+   * report it was 8750 ms and it moved the mean by 9 ms on its own.
+   */
+  let discardNextFrame = false;
+  /** Latched first non-C1 scene seen while measuring — see `noteScene`. */
+  let sceneBroke = false;
+  let brokeGuests = 0;
+  let brokeBartenders = 0;
+  let brokeQueues = 0;
+
+  let wakeLockState: WakeLockState = 'unavailable';
+  let wakeLockSentinel: WakeLockSentinel | null = null;
+
   const drawCalls = installDrawCallCounter(debug.renderer());
+
+  /**
+   * `navigator.userAgent`, formatted once.
+   *
+   * Once, because this is the one string in the report that is both long and
+   * completely static, and rebuilding it five times a second would be the
+   * overlay allocating in its own measurement window for no reason. It is also
+   * the single most load-bearing line in a device report — the run this ticket
+   * exists because of was desktop Chrome, and nothing in the report said so.
+   *
+   * It lives in its own soft-wrapping element rather than in the two-column
+   * grid so it can be printed verbatim: a 30-character column would have to
+   * either clip it or insert line breaks into it, and a user-agent string with
+   * breaks in it is no longer the string the browser reported.
+   */
+  const uaLine = `${'ua'.padEnd(19, ' ')} ${navigator.userAgent}`;
 
   // --- DOM ----------------------------------------------------------------
   const style = document.createElement('style');
@@ -139,18 +308,160 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   // writes to the clipboard, not as a prettier parallel view. Clipboard
   // permission fails silently on iOS Safari, so the fallback has to be the
   // real thing rather than an approximation of it.
+  //
+  // Three elements rather than one, and the split is by line width, not by
+  // importance: the grid in the middle is the 30-character two-column block
+  // DUB-9 sized to a 390 px phone, and `valid` and `ua` are the two rows whose
+  // text cannot be made to fit it. Putting them in full-width, soft-wrapping
+  // siblings keeps the column discipline intact *and* keeps both strings
+  // whole. Read top to bottom they are still one plain-text report, which is
+  // exactly what `reportText()` hands the clipboard.
+  const verdict = document.createElement('pre');
+  verdict.className = 'ce-debug__verdict';
+
   const out = document.createElement('pre');
   out.className = 'ce-debug__out';
+
+  const ua = document.createElement('pre');
+  ua.className = 'ce-debug__ua';
+  ua.textContent = uaLine;
 
   const statusLine = document.createElement('div');
   statusLine.className = 'ce-debug__status';
 
-  root.append(bar, out, statusLine);
+  root.append(bar, verdict, out, ua, statusLine);
   document.body.appendChild(root);
 
+  /**
+   * Keep the screen on for the length of a measurement.
+   *
+   * This is a mitigation, not a fix. `hidden_breaks` is the fix — it catches
+   * the failure after the fact and refuses to average it in. This only makes
+   * the failure rarer, by removing the most likely cause: DUB-8's protocol
+   * tells the owner to put the phone down for a minute, and a phone left alone
+   * locks its screen. Feature-detected because Safari only grew the API
+   * recently and a WebView may not have it at all, and failure is quiet
+   * because a refused lock is a legal outcome, not an error.
+   */
+  function requestWakeLock(): void {
+    releaseWakeLock();
+
+    // Typed as non-optional in lib.dom, genuinely absent in some engines —
+    // the same situation as `performance.memory`, handled the same way.
+    const wakeLock: WakeLock | undefined = navigator.wakeLock;
+    if (wakeLock === undefined || typeof wakeLock.request !== 'function') {
+      wakeLockState = 'unavailable';
+      return;
+    }
+
+    // Pessimistic until the promise resolves: the field must never claim a
+    // lock is held while the request is still in flight. The panel redraws at
+    // 5 Hz, so a granted lock shows up within 200 ms.
+    wakeLockState = 'refused';
+    wakeLock.request('screen').then(
+      (sentinel) => {
+        if (!alive) {
+          void sentinel.release();
+          return;
+        }
+        wakeLockSentinel = sentinel;
+        wakeLockState = 'held';
+      },
+      () => {
+        wakeLockState = 'refused';
+      },
+    );
+  }
+
+  function releaseWakeLock(): void {
+    const sentinel = wakeLockSentinel;
+    wakeLockSentinel = null;
+    if (sentinel !== null) void sentinel.release();
+  }
+
+  /**
+   * The page went away, or came back.
+   *
+   * Counted on the way out rather than on the way back, so a window that is
+   * hidden and never returns is still recorded as broken; the duration is
+   * added on the way back, with `buildReport` adding the in-flight tail if it
+   * is somehow called while hidden.
+   *
+   * Only while sampling: a hidden period after the panel has frozen is the
+   * owner pocketing the phone to go and paste the report, and invalidating a
+   * finished measurement for that would be the instrument crying wolf.
+   */
+  function onVisibilityChange(): void {
+    if (frozen) return;
+    const now = performance.now();
+
+    if (document.visibilityState === 'hidden') {
+      if (hiddenAt === 0) {
+        hiddenAt = now;
+        hiddenBreaks += 1;
+      }
+      return;
+    }
+
+    if (hiddenAt !== 0) {
+      hiddenMs += now - hiddenAt;
+      hiddenAt = 0;
+      discardNextFrame = true;
+    }
+  }
+
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
   // --- report -------------------------------------------------------------
+  /**
+   * Wall clock in the current window.
+   *
+   * A frozen window stops at `frozenAt` rather than at the moment the report
+   * happens to be rebuilt, so `elapsed_s` does not creep while the panel sits
+   * on the table and a second tap on "Copy report" gives the same number as
+   * the first.
+   */
+  function elapsedMsAt(now: number): number {
+    return (frozenAt ?? now) - windowStart;
+  }
+
+  /**
+   * Hidden time in the window, including a period still in progress.
+   *
+   * `rAF` does not run while hidden, so in practice the tail is only ever read
+   * by a report built from an event handler — but a field that silently
+   * under-reports in the one case it is there to catch would be no better than
+   * not having it.
+   */
+  function hiddenMsAt(now: number): number {
+    return hiddenAt === 0 ? hiddenMs : hiddenMs + (now - hiddenAt);
+  }
+
+  /**
+   * The verdict, as the `valid` row's value.
+   *
+   * One object literal per redraw — 5 Hz, in the same path that already builds
+   * the `rows` array and a fresh `Date`. The constraint that matters is that
+   * the *sampling* loop allocates nothing, and it still does not: `tick` only
+   * reaches this code on the 200 ms boundary.
+   */
+  function currentValidity(now: number): string {
+    return validityVerdict({
+      armed,
+      completed,
+      frozen,
+      elapsedMs: elapsedMsAt(now),
+      hiddenBreaks,
+      hiddenMs: hiddenMsAt(now),
+      stress: info.stress,
+      guests: sceneBroke ? brokeGuests : counts.guests,
+      bartenders: sceneBroke ? brokeBartenders : counts.bartenders,
+      queues: sceneBroke ? brokeQueues : counts.queues,
+    });
+  }
+
   function buildReport(now: number): string {
-    const elapsedMs = (frozen && measureUntil !== null ? measureUntil : now) - windowStart;
+    const elapsedMs = elapsedMsAt(now);
     const canvas = debug.canvas();
     const frames = debug.frames();
     const domParticles = confettiPieces();
@@ -211,8 +522,23 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
         'canvas_css',
         canvas === null ? 'n/a' : `${Math.round(canvas.clientWidth)}x${Math.round(canvas.clientHeight)}`,
       ],
+      // Three plain facts about the device, and no classification built on top
+      // of them. The report that triggered DUB-10 was desktop Chrome and the
+      // only hints were `canvas_css` and the existence of `heap_mb`; sniffing
+      // the UA to print "iPhone" or "desktop" would have replaced a reader's
+      // inference with the overlay's, which is not an improvement. `ua` itself
+      // is printed verbatim in its own line below the grid.
+      ['viewport_css', `${window.innerWidth}x${window.innerHeight}`],
+      ['touch_points', touchPoints()],
       ['heap_mb', heapMb()],
       ['elapsed_s', fixed(elapsedMs / 1000, 1)],
+      // Hidden periods are the reason the frame stats can be trusted at all:
+      // the frame spanning each one is discarded rather than averaged, so
+      // these two fields are what is left to say it happened. `hidden_breaks`
+      // is also the condition that drives `valid` to `no`.
+      ['hidden_breaks', String(hiddenBreaks)],
+      ['hidden_s', fixed(hiddenMsAt(now) / 1000, 1)],
+      ['wake_lock', wakeLockState],
       ['window_frames', String(n + dropped)],
       ['sim_ms_p95', fixed(frames.phases.sim.p95Ms, 2)],
       ['scene_ms_p95', fixed(frames.phases.scene.p95Ms, 2)],
@@ -226,6 +552,50 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       text += `${'dropped'.padEnd(19, ' ')} ${dropped}\n`;
     }
     return text;
+  }
+
+  /** Rebuild every visible part of the report from the same instant. */
+  function paint(now: number): void {
+    const value = currentValidity(now);
+    verdict.textContent = `${'valid'.padEnd(19, ' ')} ${value}`;
+    out.textContent = buildReport(now);
+    // The one piece of styling that carries information: an invalid report is
+    // outlined in red, so a glance at the phone is enough and nobody has to
+    // read a 36-row block to find out the run has to be done again.
+    root.classList.toggle('ce-debug--invalid', value !== 'yes');
+  }
+
+  /**
+   * What "Copy report" puts on the clipboard: the three blocks, in the order
+   * they are on screen. What you read is what you paste.
+   */
+  function reportText(): string {
+    return `${verdict.textContent ?? ''}\n${out.textContent ?? ''}${ua.textContent ?? ''}\n`;
+  }
+
+  /**
+   * Latch the first non-C1 scene seen during a measurement.
+   *
+   * The verdict is a statement about the whole window, not about the instant
+   * it was read — the same reason `frame_ms_max` is on the report. The crowd
+   * is pinned through `syncProgress`, so in principle a purchase mid-run
+   * cannot shift these counts; this is here so that if that ever stops being
+   * true, the report says so instead of the next person re-deriving it from a
+   * frame time that looks slightly off.
+   */
+  function noteScene(): void {
+    if (sceneBroke || !armed || frozen) return;
+    if (
+      counts.guests === C1_GUESTS &&
+      counts.bartenders === C1_BARTENDERS &&
+      counts.queues === C1_QUEUES
+    ) {
+      return;
+    }
+    sceneBroke = true;
+    brokeGuests = counts.guests;
+    brokeBartenders = counts.bartenders;
+    brokeQueues = counts.queues;
   }
 
   /** Frames in the trailing second, as fps. The field DUB-9 calls `fps`. */
@@ -253,6 +623,18 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     return fixed(memory.usedJSHeapSize / (1024 * 1024), 1);
   }
 
+  /**
+   * `navigator.maxTouchPoints`. 0 on a desktop mouse, 5 on an iPhone.
+   *
+   * Not a device test and not used as one — it is one of the three facts that
+   * let a reader see for themselves what the report came off, next to `ua` and
+   * `viewport_css`.
+   */
+  function touchPoints(): string {
+    const points = navigator.maxTouchPoints;
+    return typeof points === 'number' ? String(points) : 'n/a';
+  }
+
   function resetWindow(now: number): void {
     sampleCount = 0;
     dropped = 0;
@@ -261,6 +643,20 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     peakFps = 0;
     windowStart = now;
     lastFrameAt = now;
+    // The integrity counters belong to the window, not to the page: a hidden
+    // period before the owner tapped "Start" says nothing about the run that
+    // follows it.
+    // Already hidden when the window opens counts as the first break: the
+    // `visibilitychange` that would have counted it fired before the reset.
+    const startsHidden = document.visibilityState === 'hidden';
+    hiddenBreaks = startsHidden ? 1 : 0;
+    hiddenMs = 0;
+    hiddenAt = startsHidden ? now : 0;
+    discardNextFrame = false;
+    sceneBroke = false;
+    brokeGuests = 0;
+    brokeBartenders = 0;
+    brokeQueues = 0;
     drawCalls?.reset();
     // Put the duty-cycle window on the same 60 s as everything else here, so
     // `busy_pct` and `fps` in one report describe the same stretch of time.
@@ -271,28 +667,50 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   startButton.addEventListener('click', () => {
     const now = performance.now();
     frozen = false;
+    frozenAt = null;
+    armed = true;
+    completed = false;
     resetWindow(now);
     measureUntil = now + MEASURE_MS;
     status = 'measuring 60 s — leave the phone alone';
     applyFrozenClass();
+    // Inside the tap, so iOS treats it as user-initiated. A rejection is
+    // reported through `wake_lock` and changes nothing else.
+    requestWakeLock();
     debug.counts(counts);
-    out.textContent = buildReport(now);
+    noteScene();
+    paint(now);
     statusLine.textContent = status;
   });
 
   copyButton.addEventListener('click', () => {
-    // iOS Safari only honours a clipboard write that happens inside the user
-    // gesture. So the text is built and handed over synchronously here, before
-    // any `await` — the promise is only used to report the outcome afterwards.
-    const text = out.textContent ?? '';
+    const now = performance.now();
 
     // Freeze on copy as well as on timeout. `user-select` is off document-wide
     // and the panel is touch-transparent while live, so this is what makes the
     // on-screen text actually selectable when the clipboard write fails
     // quietly — which on iOS it does.
+    //
+    // Frozen *before* the text is built, not after, and that ordering is the
+    // whole of DUB-10's "copied early still says `valid no`": the verdict for
+    // an unfinished window depends on whether it was copied or is still
+    // running, so the report has to be rebuilt once the answer is known.
     frozen = true;
+    // Only the first freeze sets the clock, and the report is rebuilt as of
+    // *that* instant. A second tap on "Copy report" must hand over the same
+    // numbers as the first, not the same numbers with a longer `elapsed_s` and
+    // an `fps` of zero on them.
+    const at = frozenAt ?? now;
+    frozenAt = at;
     measureUntil = null;
+    releaseWakeLock();
     applyFrozenClass();
+    paint(at);
+
+    // iOS Safari only honours a clipboard write that happens inside the user
+    // gesture. So the text is built and handed over synchronously here, before
+    // any `await` — the promise is only used to report the outcome afterwards.
+    const text = reportText();
 
     const clipboard = navigator.clipboard;
     if (clipboard !== undefined && typeof clipboard.writeText === 'function') {
@@ -344,13 +762,35 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       const delta = now - lastFrameAt;
       lastFrameAt = now;
 
-      if (sampleCount < MAX_SAMPLES) {
-        samples[sampleCount] = delta;
-        sampleCount += 1;
-      } else {
-        dropped += 1;
+      // The two frames that are not frame times.
+      //
+      // `discardNextFrame` is the one that spans a hidden period: `rAF` stops
+      // while the page is not visible and the callback that arrives when it
+      // comes back carries the whole gap in its delta. The owner's first
+      // report recorded one of those as `frame_ms_max 8750` and let it pull
+      // `frame_ms_mean` to 23.11 ms, which is how a 26-second run came to
+      // describe a frame rate nobody had experienced.
+      //
+      // `document.hidden` is the belt and braces: some engines throttle `rAF`
+      // to roughly 1 Hz in a hidden document rather than stopping it, and a
+      // run of 1000 ms "frames" would be just as wrong and much less obvious.
+      // Reading the flag costs nothing and allocates nothing.
+      const gapFrame = discardNextFrame || document.hidden;
+      discardNextFrame = false;
+
+      if (!gapFrame) {
+        if (sampleCount < MAX_SAMPLES) {
+          samples[sampleCount] = delta;
+          sampleCount += 1;
+        } else {
+          dropped += 1;
+        }
       }
 
+      // The timestamp still goes in even for a discarded frame, and must: the
+      // rolling second is a window over *when* frames happened, so leaving the
+      // gap frame out of it would make `fps` read as though the frames either
+      // side of the gap were adjacent.
       if (recentFilled < RECENT) {
         recent[recentFilled] = now;
         recentFilled += 1;
@@ -364,10 +804,21 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       if (fps > peakFps) peakFps = fps;
 
       if (measureUntil !== null && now >= measureUntil) {
+        // The window closes at its own deadline, not at the frame that
+        // happened to notice — otherwise a hidden period straddling the 60 s
+        // mark would print an `elapsed_s` of 68.
+        const deadline = measureUntil;
         frozen = true;
-        status = 'measurement complete — frozen, tap “Copy report”';
+        completed = true;
+        frozenAt = deadline;
+        measureUntil = null;
+        releaseWakeLock();
+        status =
+          hiddenBreaks > 0
+            ? 'complete but INVALID — the page was hidden; read the valid row and run it again'
+            : 'measurement complete — frozen, tap “Copy report”';
         applyFrozenClass();
-        out.textContent = buildReport(now);
+        paint(deadline);
         statusLine.textContent = status;
         drawCalls?.commit();
         return;
@@ -381,17 +832,20 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     if (frozen) return;
 
     debug.counts(counts);
-    out.textContent = buildReport(now);
+    noteScene();
+    paint(now);
     statusLine.textContent = status;
   }
 
-  out.textContent = buildReport(windowStart);
+  paint(windowStart);
   statusLine.textContent = status;
 
   return {
     destroy: () => {
       alive = false;
       cancelAnimationFrame(rafHandle);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      releaseWakeLock();
       drawCalls?.restore();
       root.remove();
       style.remove();
@@ -589,11 +1043,45 @@ const CSS = `
   column-fill: balance;
   /* Two 30-character columns plus the gap and the padding, in the element's
      own monospace ch unit. The longest row the report can produce is
-     "bartenders_rendered" (19) + a space + a ten-character value. */
+     "bartenders_rendered" (19) + a space + a ten-character value.
+     One row exceeds that by a single character — "wake_lock unavailable" is
+     31 — and spends it on the 10 px column gap rather than on the next
+     column's text. Widening the block instead would push it past the 390 px
+     phone this font size was chosen for, and shortening the value would mean
+     inventing a word for "the API is not here", which is the one thing this
+     overlay does not do. */
   width: calc(60ch + 10px + 18px);
   max-width: calc(100vw - 14px);
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* The two rows that cannot fit a 30-character column.
+   Both soft-wrap instead of being truncated or broken by hand: a verdict with
+   a reason clipped off it, or a user-agent string with newlines inserted into
+   it, would each be a different kind of lie than the one DUB-10 came to fix.
+   They are separate elements so the grid below keeps its column discipline —
+   and because "white-space: pre-wrap" does not survive CSS multicol intact. */
+.ce-debug__verdict,
+.ce-debug__ua {
+  margin: 0 0 4px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #06130f;
+  border: 1px solid #1d4d3e;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  width: calc(60ch + 10px + 18px);
+  max-width: calc(100vw - 14px);
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ce-debug__ua {
+  margin: 4px 0 0;
+  /* Dimmer than the numbers: it is identity, not a measurement. */
+  color: #9fd9c4;
 }
 
 .ce-debug__status {
@@ -609,10 +1097,22 @@ const CSS = `
 /* Frozen: the numbers have stopped moving, so the text becomes selectable and
    the panel starts taking taps. While live it stays transparent to touch so it
    is never in the way of a cash bubble. */
-.ce-debug--frozen .ce-debug__out {
+.ce-debug--frozen .ce-debug__out,
+.ce-debug--frozen .ce-debug__verdict,
+.ce-debug--frozen .ce-debug__ua {
   pointer-events: auto;
   user-select: text;
   -webkit-user-select: text;
   border-color: #38e8b0;
+}
+
+/* The verdict is the only thing on this panel that is styled to carry
+   information. A 36-row block of numbers all looks equally plausible, which is
+   the failure mode DUB-10 exists for — so an invalid window is red at a
+   glance, from across a table, before anybody starts reading. */
+.ce-debug--invalid .ce-debug__verdict {
+  background: #2a0b0b;
+  border-color: #ff6b6b;
+  color: #ffd9d9;
 }
 `;
