@@ -237,7 +237,7 @@ Production JS, gzipped (`npm run build`):
 | CSS              | 17.5 kB    | 3.6 kB     | yes                      |
 | index.html       | 2.9 kB     | 1.3 kB     | yes                      |
 | **normal load**  | **818 kB** | **239 kB** |                          |
-| overlay          | 8.1 kB     | 3.6 kB     | **no — `?debug=1` only** |
+| overlay          | 12.3 kB    | 5.2 kB     | **no — `?debug=1` only** |
 
 **239 kB transferred against the 4 MB hard ceiling** — 5.8% of it. The only
 file in `dist/` that is not code is a 237-byte favicon: every sprite is a

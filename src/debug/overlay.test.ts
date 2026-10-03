@@ -16,7 +16,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { validityVerdict, type MeasurementWindow } from './overlay.ts';
+import {
+  C1_BARTENDERS,
+  C1_GUESTS,
+  C1_QUEUES,
+  validityVerdict,
+  type MeasurementWindow,
+} from './overlay.ts';
 import {
   STRESS_BARTENDERS,
   STRESS_GUESTS,
@@ -32,14 +38,30 @@ const CLEAN: MeasurementWindow = {
   hiddenBreaks: 0,
   hiddenMs: 0,
   stress: true,
-  guests: STRESS_GUESTS,
-  bartenders: STRESS_BARTENDERS,
-  queues: STRESS_QUEUES,
+  guests: C1_GUESTS,
+  bartenders: C1_BARTENDERS,
+  queues: C1_QUEUES,
 };
 
 function verdict(patch: Partial<MeasurementWindow>): string {
   return validityVerdict({ ...CLEAN, ...patch });
 }
+
+describe('the C1 counts the verdict checks against', () => {
+  it('match the stress scene the overlay is validating', () => {
+    // `overlay.ts` writes 25 / 9 / 3 out by hand rather than importing these,
+    // because importing the computed `STRESS_BARTENDERS` stops Rolldown
+    // dead-code-eliminating it and grows the *flag-off* bundle — see the
+    // comment on `C1_GUESTS`. This assertion is the price of that: the day the
+    // certification scene moves, CI fails here instead of the overlay quietly
+    // validating every run against a floor the game no longer has.
+    expect([C1_GUESTS, C1_BARTENDERS, C1_QUEUES]).toEqual([
+      STRESS_GUESTS,
+      STRESS_BARTENDERS,
+      STRESS_QUEUES,
+    ]);
+  });
+});
 
 describe('validityVerdict', () => {
   it('passes a clean 60 s run on the C1 scene', () => {

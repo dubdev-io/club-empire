@@ -53,12 +53,30 @@
  */
 
 import type { GameRuntime } from '../game/runtime.ts';
-import {
-  STRESS_BARTENDERS,
-  STRESS_GUESTS,
-  STRESS_QUEUES,
-} from '../game/stressScene.ts';
 import type { RenderCounts } from '../render/clubScene.ts';
+
+/**
+ * The C1 floor the `valid` verdict checks against: 25 guests, 9 bartenders,
+ * 3 queues.
+ *
+ * Written out here rather than imported from `game/stressScene.ts`, which is
+ * where they really live, and that is a deliberate trade rather than an
+ * oversight. `STRESS_BARTENDERS` there is computed — `STATION_DEFS.length *
+ * MAX_LANES` — so with nothing referencing it, Rolldown drops the binding from
+ * the main bundle entirely. A reference from this chunk brings it back, and the
+ * *flag-off* bundle grows by 15 bytes it did not have before. DUB-10's one
+ * hard constraint is that the build behind the published URL stays the Phase 1
+ * review build plus this overlay, and 15 bytes of otherwise-dead constant in
+ * the chunk every player downloads is still not that.
+ *
+ * The coupling is enforced in `overlay.test.ts` instead, which asserts these
+ * three against the real `STRESS_*` constants. The test is not bundled, so it
+ * costs the player nothing, and the day the C1 scene moves, CI says so rather
+ * than the overlay quietly validating against the old floor.
+ */
+export const C1_GUESTS = 25;
+export const C1_BARTENDERS = 9;
+export const C1_QUEUES = 3;
 
 /** Length of the 60 s measurement, in ms. The number DUB-9 asks for. */
 const MEASURE_MS = 60_000;
@@ -172,13 +190,13 @@ export function validityVerdict(measured: MeasurementWindow): string {
   if (!measured.stress) return 'no — scene was normal, not stress';
 
   if (
-    measured.guests !== STRESS_GUESTS ||
-    measured.bartenders !== STRESS_BARTENDERS ||
-    measured.queues !== STRESS_QUEUES
+    measured.guests !== C1_GUESTS ||
+    measured.bartenders !== C1_BARTENDERS ||
+    measured.queues !== C1_QUEUES
   ) {
     return (
       `no — scene was ${measured.guests}/${measured.bartenders}/${measured.queues}, ` +
-      `not ${STRESS_GUESTS}/${STRESS_BARTENDERS}/${STRESS_QUEUES}`
+      `not ${C1_GUESTS}/${C1_BARTENDERS}/${C1_QUEUES}`
     );
   }
 
@@ -568,9 +586,9 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   function noteScene(): void {
     if (sceneBroke || !armed || frozen) return;
     if (
-      counts.guests === STRESS_GUESTS &&
-      counts.bartenders === STRESS_BARTENDERS &&
-      counts.queues === STRESS_QUEUES
+      counts.guests === C1_GUESTS &&
+      counts.bartenders === C1_BARTENDERS &&
+      counts.queues === C1_QUEUES
     ) {
       return;
     }
