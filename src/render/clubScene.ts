@@ -77,6 +77,43 @@ export type SceneHit =
   | { readonly kind: 'station'; readonly station: StationKey }
   | { readonly kind: 'locked-station'; readonly station: StationKey };
 
+/**
+ * A fixed crowd allocation, overriding what the flow would have drawn.
+ *
+ * Exists for one reason: DUB-6's criterion C1 is specified at "25 guests, 9
+ * bartenders and 3 queues on screen", and no single purchase state puts
+ * exactly that crowd on the floor — at full build-out every queue is one guest
+ * deep, because the door only outruns capacity by 0.06 guests/s. Pinning the
+ * counts is what makes the measurement scene reproducible rather than
+ * approximately right.
+ *
+ * Bartenders are deliberately *not* pinnable: there is one per owned lane, so
+ * C1's 9 is a property of the club state and faking it here would mean
+ * measuring a floor the player can never own.
+ */
+export interface CrowdPin {
+  readonly queuePerStation: number;
+  readonly doorQueue: number;
+  readonly dancers: number;
+}
+
+/**
+ * Live sprite counts for the `?debug=1` overlay.
+ *
+ * Written into a caller-owned object: the overlay samples this several times a
+ * second and must not add an allocation to the frame it is measuring.
+ */
+export interface RenderCounts {
+  /** Dancers plus every queued guest, at the bars and at the door. §11 caps this at 30. */
+  guests: number;
+  /** One per owned lane on an open station. */
+  bartenders: number;
+  /** Queues with at least one guest in them — the three bars and the door. */
+  queues: number;
+  /** Transient effect sprites: cash bubbles, their VIP rings, and the hint ring. */
+  particles: number;
+}
+
 /** Bottles on the back bar at level 1 and at level 30. Progress you can see from the floor. */
 const BOTTLES_MIN = 2;
 const BOTTLES_MAX = 10;
@@ -171,6 +208,8 @@ export class ClubScene {
   private beatIndex = 0;
   private litTile = 0;
   private reducedMotion = false;
+  /** Non-null only under `?debug=1&stress=1`. See `CrowdPin`. */
+  private crowdPin: CrowdPin | null = null;
   private rngState = 0x6d2b79f5;
   /** Dotted->solid crossfade position for the next-purchase outline, 0..1. */
   private affordableT = 0;
@@ -410,6 +449,62 @@ export class ClubScene {
     }
   }
 
+  /**
+   * Pin the crowd to a fixed allocation, or `null` to follow the flow again.
+   *
+   * Goes through `syncProgress` so a later purchase cannot quietly un-pin the
+   * scene halfway through a 60 s measurement.
+   */
+  pinCrowd(pin: CrowdPin | null): void {
+    this.crowdPin = pin;
+    this.syncProgress();
+  }
+
+  /**
+   * Count what is actually on screen, into a caller-owned object.
+   *
+   * Reads `visible` flags rather than re-deriving from the flow, so the
+   * overlay reports what the GPU was asked to draw — which is the only number
+   * worth putting next to a frame time. Bounded work: 30 dancers, 3x6 bar
+   * queue slots, 7 door slots, 9 lanes, 3 bubbles.
+   */
+  countRendered(out: RenderCounts): void {
+    let guests = this.activeDancers;
+    let bartenders = 0;
+    let queues = 0;
+
+    for (let s = 0; s < this.stations.length; s += 1) {
+      const art = this.stations[s]!;
+      for (let lane = 0; lane < art.bartenders.length; lane += 1) {
+        if (art.bartenders[lane]!.body.visible) bartenders += 1;
+      }
+      let waiting = 0;
+      for (let i = 0; i < art.queue.length; i += 1) {
+        if (art.queue[i]!.body.visible) waiting += 1;
+      }
+      guests += waiting;
+      if (waiting > 0) queues += 1;
+    }
+
+    let atDoor = 0;
+    for (let i = 0; i < this.doorQueue.length; i += 1) {
+      if (this.doorQueue[i]!.body.visible) atDoor += 1;
+    }
+    guests += atDoor;
+    if (atDoor > 0) queues += 1;
+
+    let particles = this.hintRing.visible ? 1 : 0;
+    for (let i = 0; i < this.bubbleBodies.length; i += 1) {
+      if (this.bubbleBodies[i]!.visible) particles += 1;
+      if (this.bubbleRings[i]!.visible) particles += 1;
+    }
+
+    out.guests = guests;
+    out.bartenders = bartenders;
+    out.queues = queues;
+    out.particles = particles;
+  }
+
   // -------------------------------------------------------------------------
   // Structure — purchase-time only, allowed to allocate
   // -------------------------------------------------------------------------
@@ -422,6 +517,7 @@ export class ClubScene {
    */
   syncProgress(): void {
     const flow = this.state.derived.flow;
+    const pin = this.crowdPin;
 
     let queued = 0;
 
@@ -469,12 +565,14 @@ export class ClubScene {
       // with nothing to do. Both come straight off the flow — the floor does
       // not invent a queue the economy does not have.
       const waiting =
-        stationFlow && stationFlow.saturated
-          ? Math.min(
-              STATION_QUEUE_MAX,
-              Math.max(1, Math.round(flow.turnedAwayPerSecond * QUEUE_PER_GUEST_PER_SECOND) + 1),
-            )
-          : 0;
+        pin !== null
+          ? Math.min(STATION_QUEUE_MAX, pin.queuePerStation)
+          : stationFlow && stationFlow.saturated
+            ? Math.min(
+                STATION_QUEUE_MAX,
+                Math.max(1, Math.round(flow.turnedAwayPerSecond * QUEUE_PER_GUEST_PER_SECOND) + 1),
+              )
+            : 0;
 
       for (let i = 0; i < art.queue.length; i += 1) {
         const show = i < waiting && queued < MAX_RENDERED_GUESTS;
@@ -487,9 +585,11 @@ export class ClubScene {
     // Door queue: guests arriving that no station can take.
     const turnedAway = flow.turnedAwayPerSecond;
     const doorWaiting =
-      turnedAway > 0.001
-        ? Math.min(DOOR_QUEUE_MAX, Math.max(1, Math.round(turnedAway * QUEUE_PER_GUEST_PER_SECOND)))
-        : 0;
+      pin !== null
+        ? Math.min(DOOR_QUEUE_MAX, pin.doorQueue)
+        : turnedAway > 0.001
+          ? Math.min(DOOR_QUEUE_MAX, Math.max(1, Math.round(turnedAway * QUEUE_PER_GUEST_PER_SECOND)))
+          : 0;
     for (let i = 0; i < this.doorQueue.length; i += 1) {
       const show = i < doorWaiting && queued < MAX_RENDERED_GUESTS;
       this.doorQueue[i]!.body.visible = show;
@@ -501,7 +601,8 @@ export class ClubScene {
     // Whatever the queues did not use goes to the dance floor. One guest
     // sprite per 0.35 guests/s served reads as "busy" without pretending the
     // room holds more people than §11 allows.
-    const wantDancers = Math.round(flow.servedPerSecond / 0.35) + 3;
+    const wantDancers =
+      pin !== null ? pin.dancers : Math.round(flow.servedPerSecond / 0.35) + 3;
     this.setDancerCount(Math.min(MAX_RENDERED_GUESTS - queued, wantDancers));
 
     this.placeOutline();

@@ -73,6 +73,15 @@ google-chrome --headless=new --remote-debugging-port=9222 --no-sandbox \
 The production build is static files in `dist/`. There is no backend, no
 server and no database.
 
+**`npm run build` sets Vite's `base` to `/club-empire/`**, the GitHub Pages
+project subpath — without it every asset 404s under that path. The dev server
+is unaffected and still serves from `/`. `CLUB_EMPIRE_BASE` overrides both, for
+a host that serves from the root:
+
+```bash
+CLUB_EMPIRE_BASE=/ npm run build
+```
+
 ### Viewing it as a phone
 
 The design size is **390×844 portrait**. In desktop Chrome, open DevTools →
@@ -219,21 +228,25 @@ convert time into money; that formula belongs to the design brief.
 
 Production JS, gzipped (`npm run build`):
 
-| chunk            | raw        | gzipped    |
-| ---------------- | ---------- | ---------- |
-| pixi             | 511.7 kB   | 143.7 kB   |
-| react            | 218.8 kB   | 67.5 kB    |
-| app              | 62.5 kB    | 19.2 kB    |
-| rolldown-runtime | 0.7 kB     | 0.5 kB     |
-| CSS              | 17.4 kB    | 3.6 kB     |
-| index.html       | 2.9 kB     | 1.3 kB     |
-| **total**        | **814 kB** | **236 kB** |
+| chunk            | raw        | gzipped    | fetched on a normal load |
+| ---------------- | ---------- | ---------- | ------------------------ |
+| pixi             | 511.7 kB   | 143.7 kB   | yes                      |
+| react            | 218.8 kB   | 67.5 kB    | yes                      |
+| app              | 63.0 kB    | 19.4 kB    | yes                      |
+| rolldown-runtime | 0.7 kB     | 0.5 kB     | yes                      |
+| CSS              | 17.4 kB    | 3.6 kB     | yes                      |
+| index.html       | 2.9 kB     | 1.3 kB     | yes                      |
+| **normal load**  | **815 kB** | **236 kB** |                          |
+| overlay          | 9.0 kB     | 3.8 kB     | **no — `?debug=1` only** |
 
 **236 kB transferred against the 4 MB hard ceiling** — 5.8% of it. The only
 file in `dist/` that is not code is a 237-byte favicon: every sprite is a
 PixiJS path rasterised at boot and every sound is a Web Audio oscillator, so
 the ~660 kB atlas and ~720 kB audio the brief budgeted are both unspent. See
 `CREDITS.md`.
+
+The `overlay` chunk is not in the `modulepreload` list and is never requested
+without the flag; see the next section.
 
 `npm run build` emits **no sourcemaps**: they were 3.4 MB of host payload and
 published readable source for no benefit to the player. Use `npm run build:debug`
@@ -259,6 +272,11 @@ game has no way to set its own cash.
 | `window.__clubStore` | The Zustand store, for driving UI states by hand |
 | `?noboot=1` | Load the page without starting the game, so storage can be seeded |
 
+Being dev-only is exactly why these cannot carry a device measurement: Vite
+eliminates every one of them from `dist`, so a published build has none of
+them. `?debug=1` and `?debug=1&stress=1` below are the two routes that survive
+into production, and they are the ones QA and the owner use.
+
 ## Measured against the acceptance criteria
 
 | Criterion | Measured | How |
@@ -271,3 +289,110 @@ game has no way to set its own cash.
 Criterion 8's **GPU side is unverified**: this container has no GPU, WebGL runs
 on SwiftShader, and no honest fps number for a Pixel 6a can come from here. The
 CPU-side figure is the half that does transfer.
+
+## Measuring the frame rate — `?debug=1`
+
+Add `?debug=1` to any build, dev or published, and a read-out appears in the
+top-left corner. It works the same on the deployed URL as on the dev server,
+because the number that matters is the one off a real phone.
+
+```
+https://<host>/club-empire/?debug=1            # the overlay, normal play
+https://<host>/club-empire/?debug=1&stress=1   # the overlay, DUB-6 C1 scene
+```
+
+**Without the flag it costs nothing.** The overlay is loaded by a dynamic
+`import()` that only runs when `debug=1` is present, so it is its own chunk, it
+is not preloaded, and the browser never fetches it in normal play. No DOM node,
+no listener and no `requestAnimationFrame` hook exists without the flag.
+
+While a measurement is running the panel is transparent to touch — only its two
+buttons take a tap — so cash bubbles underneath it are still tappable. It does
+cover the HUD's cash and Last Call readouts, which is the trade for keeping it
+clear of everything below.
+
+### Fields
+
+QA reads these off the overlay for the DUB-6 C1 frame-budget numbers. **The
+names are a contract: do not rename one without saying so on DUB-6.**
+
+| field                 | meaning                                                              |
+| --------------------- | -------------------------------------------------------------------- |
+| `build`               | short commit SHA, substituted at build time; `dev` on the dev server  |
+| `scene`               | `normal`, or `stress` under `stress=1`                                |
+| `state`               | `live`, or `FROZEN` after a 60 s run or a copy                        |
+| `date` / `time`       | when the reading was taken, UTC                                       |
+| `fps`                 | frames in the trailing 1 s                                            |
+| `fps_p1_worst`        | the slowest 1% of frames in the window, as fps (the p99 frame time)   |
+| `frame_ms_mean`       | mean wall time between frames, over the window                        |
+| `frame_ms_max`        | the single worst frame in the window                                  |
+| `refresh_cap_hz`      | highest `fps` seen — says whether iOS capped at 120, 60, or 30 (Low Power Mode) |
+| `draw_calls`          | `gl.draw*` calls in the last frame; `n/a` if the context is not WebGL |
+| `guests_rendered`     | dancers plus every queued guest. §11 caps this at 30                  |
+| `bartenders_rendered` | visible bartenders — one per owned lane on an open station            |
+| `queues_rendered`     | queues with at least one guest: the three bars and the door           |
+| `particles_rendered`  | transient effect sprites — cash bubbles, VIP rings, the hint ring     |
+| `dpr`                 | `window.devicePixelRatio`                                             |
+| `canvas_px`           | canvas backing-store size. A 3x phone draws ~9x the pixels of a 1x one |
+| `canvas_css`          | canvas CSS size                                                       |
+| `heap_mb`             | `performance.memory` — **Chrome only, `n/a` on Safari**, never guessed |
+| `elapsed_s`           | time in the current measurement window                                |
+| `window_frames`       | frames sampled in the window                                          |
+| `sim_ms_p95` …        | per-system p95 from `FrameProbe` — which system spent the budget      |
+
+Two of these need a note.
+
+`dpr` and `canvas_px` will disagree on a 3x phone, and that is correct:
+`createStage` caps the renderer resolution at 2 (see "Performance rules this
+code follows"). On a 390x844 iPhone at `dpr 3.00` the backing store is
+`780x1688`, not `1170x2532` — so the GPU is being asked for 4x the CSS pixels,
+not 9x. Both numbers are on the overlay precisely so a reader can see the cap
+rather than assume it.
+
+`particles_rendered` tops out at about 4, because Phase 1 has **no particle
+emitter** — the only transient sprites are the cash bubbles, their VIP rings and
+the hint ring. §11's 60-particle cap is unused today. The field is there so the
+number is visible rather than assumed.
+
+### The two buttons
+
+- **Start 60 s measurement** — resets the window, collects for 60 s, then
+  freezes so the numbers can be read with the phone on the table.
+- **Copy report** — writes the whole block to the clipboard, inside the tap
+  handler (iOS Safari refuses a clipboard write after an `await`). It also
+  freezes the panel and makes the on-screen text selectable, because clipboard
+  permission on iOS fails quietly and the fallback has to be the real text.
+
+### `stress=1` — the certification scene
+
+`?debug=1&stress=1` boots straight into the scene DUB-6's criterion C1 is
+specified at: **25 guests, 9 bartenders, 3 queues**. Same state on every load —
+all three bars open with three lanes each and the Door at L8, the Booth one
+level short of maxed so the next-purchase outline is still drawn, cash at 0, a
+fixed RNG seed, and the crowd pinned at four guests per bar queue plus thirteen
+dancers.
+
+`stress=1` is only honoured alongside `debug=1`, and the stress scene **never
+reads or writes `localStorage`** — opening it on the phone you also play on
+cannot cost you your club.
+
+The club state and the crowd arithmetic are covered by
+`src/game/stressScene.test.ts`. What that cannot cover is the sprite side:
+`ClubScene` needs a WebGL context and the tests run on node. The check that the
+scene honours the pin is reading `guests_rendered` / `bartenders_rendered` /
+`queues_rendered` off the overlay on the device — a known gap, not an assumed
+pass.
+
+## Publishing
+
+`.github/workflows/pages.yml` builds `main` and deploys `dist/` to GitHub Pages.
+At the time it was committed, **Pages is refused on this repository**:
+
+```
+POST /repos/dubdev-io/club-empire/pages  ->  422
+{"message":"Your current plan does not support GitHub Pages for this repository."}
+```
+
+The repo is private and the org's plan only allows Pages on public repositories.
+The workflow is committed ready to run and needs no edit once Pages is enabled;
+the hosting decision belongs to the owner (DUB-9).

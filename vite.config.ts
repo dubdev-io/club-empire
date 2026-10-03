@@ -1,8 +1,47 @@
+import { execFileSync } from 'node:child_process';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export default defineConfig({
+/**
+ * GitHub Pages serves a project site from `https://<org>.github.io/<repo>/`, so
+ * every asset URL in the build has to carry that prefix or the page loads and
+ * then 404s on its own JavaScript.
+ *
+ * Applied to `build` only. The dev server keeps serving from `/`, because
+ * moving it to `/club-empire/` would change the URL every developer and the
+ * screenshot driver already have. `CLUB_EMPIRE_BASE` overrides both, which is
+ * what a different host (a root-served bucket, say) would need — and DUB-9
+ * leaves the hosting choice with the owner.
+ */
+const PAGES_BASE = '/club-empire/';
+
+/**
+ * Short commit SHA for the overlay's `build` field.
+ *
+ * `GITHUB_SHA` is what CI has; `git rev-parse` is what a local build has.
+ * Neither is fatal if missing — a build that cannot name itself is still a
+ * build, it just produces a frame-rate number nobody can tie to a commit, and
+ * saying `unknown` is the honest way to admit that.
+ */
+function resolveBuildSha(): string {
+  const fromCi = process.env.GITHUB_SHA;
+  if (fromCi !== undefined && fromCi !== '') return fromCi.slice(0, 7);
+  try {
+    return execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
+export default defineConfig(({ command }) => ({
   plugins: [react()],
+  base: process.env.CLUB_EMPIRE_BASE ?? (command === 'build' ? PAGES_BASE : '/'),
+  define: {
+    __CLUB_BUILD__: JSON.stringify(command === 'build' ? resolveBuildSha() : 'dev'),
+  },
   server: {
     host: true,
     port: 5173,
@@ -41,4 +80,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

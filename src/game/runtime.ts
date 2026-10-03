@@ -1,3 +1,4 @@
+import type { Renderer } from 'pixi.js';
 import {
   AVERAGE_SPEND_MULTIPLIER,
   DOOR_MAX,
@@ -13,7 +14,7 @@ import {
   totalCapacity,
   type StationKey,
 } from '../config/economy.ts';
-import { ClubScene } from '../render/clubScene.ts';
+import { ClubScene, type RenderCounts } from '../render/clubScene.ts';
 import { createStage, type Stage } from '../render/stage.ts';
 import { createTextures, type GeneratedTextures } from '../render/textures.ts';
 import { AUTOSAVE_INTERVAL_MS } from '../sim/constants.ts';
@@ -46,7 +47,8 @@ import {
   type StructureSnapshot,
 } from '../state/store.ts';
 import { createAudio, vibrate } from './audio.ts';
-import { FrameProbe } from './frameProbe.ts';
+import { FrameProbe, type FrameReport } from './frameProbe.ts';
+import { STRESS_CROWD, createStressClub } from './stressScene.ts';
 
 /** How often the UI read model is refreshed. 10 Hz is below the eye's ability
  *  to read a changing number and well under the React render budget. */
@@ -57,6 +59,35 @@ const STAR_DISMISS_MS = 800;
 
 export interface GameRuntime {
   destroy(): void;
+  /**
+   * Read-only handle for the `?debug=1` overlay.
+   *
+   * Building it costs one object literal at boot and nothing after that, and
+   * nothing in the shipping bundle calls into it — the overlay is the only
+   * caller and it lives in a chunk that is never fetched without the flag.
+   */
+  readonly debug: GameDebugHandle;
+}
+
+export interface StartOptions {
+  /**
+   * `?debug=1&stress=1`. Boots straight into the DUB-6 C1 certification scene
+   * and takes the save out of the loop entirely — neither read nor written —
+   * so measuring the frame rate cannot cost the player their club.
+   */
+  readonly stress?: boolean;
+}
+
+/** What the debug overlay is allowed to see. Deliberately four narrow holes. */
+export interface GameDebugHandle {
+  /** The Pixi renderer, for draw-call counting. Null when WebGL was refused. */
+  renderer(): Renderer | null;
+  /** The canvas, for `dpr` and the backing-store size. Null when WebGL was refused. */
+  canvas(): HTMLCanvasElement | null;
+  /** Live sprite counts, written into `out` so sampling allocates nothing. */
+  counts(out: RenderCounts): void;
+  /** Per-system frame timing, for the DUB-6 C1 breakdown. */
+  frames(): FrameReport;
 }
 
 /**
@@ -74,13 +105,28 @@ export interface GameRuntime {
  * than by the 100 ms tick — which is what makes criterion 2's "< 100 ms"
  * achievable rather than marginal.
  */
-export async function startGame(parent: HTMLElement): Promise<GameRuntime> {
+export async function startGame(
+  parent: HTMLElement,
+  options: StartOptions = {},
+): Promise<GameRuntime> {
   const store = useGameStore;
   const probe = new FrameProbe();
 
+  /**
+   * The stress scene is a measurement fixture, not a session.
+   *
+   * Handing `null` storage to the save layer is the whole mechanism: `loadSave`
+   * reports `empty`, `writeSave` and `clearSave` are no-ops, and the autosave
+   * timer and the lifecycle handlers below keep their existing shape without
+   * needing a second code path. Opening `?debug=1&stress=1` therefore cannot
+   * overwrite a real club — which matters, because the owner is going to open
+   * this URL on the phone they also play on.
+   */
+  const persistent = options.stress !== true;
+
   // --- settings and state restore ----------------------------------------
-  const storage: SaveStorage | null = getBrowserStorage();
-  store.getState().setStorageUnavailable(storage === null);
+  const storage: SaveStorage | null = persistent ? getBrowserStorage() : null;
+  store.getState().setStorageUnavailable(persistent && storage === null);
 
   let settings: SavedSettings = { ...DEFAULT_SETTINGS };
   let club: ClubState;
@@ -88,7 +134,10 @@ export async function startGame(parent: HTMLElement): Promise<GameRuntime> {
   let offlineLastSeenAt: number | null = null;
 
   const result = loadSave(storage);
-  if (result.status === 'loaded') {
+  if (!persistent) {
+    club = createStressClub();
+    store.getState().setSaveStatus('new');
+  } else if (result.status === 'loaded') {
     club = restoreClub(result.save.club);
     settings = result.save.settings;
     restoredTicks = result.save.elapsedTicks;
@@ -126,13 +175,30 @@ export async function startGame(parent: HTMLElement): Promise<GameRuntime> {
     console.error('Club Empire could not create a WebGL context', error);
     store.getState().setWebglUnavailable(true);
     store.getState().setBooting(false, 1);
-    return { destroy: () => {} };
+    // The overlay still mounts on a WebGL failure — "no canvas" is itself a
+    // result worth reading off a phone — so it gets a handle that reports
+    // nothing rather than no handle at all.
+    return {
+      destroy: () => {},
+      debug: {
+        renderer: () => null,
+        canvas: () => null,
+        counts: (out) => {
+          out.guests = 0;
+          out.bartenders = 0;
+          out.queues = 0;
+          out.particles = 0;
+        },
+        frames: () => probe.report(),
+      },
+    };
   }
 
   store.getState().setBooting(true, 0.6);
   textures = createTextures(stage.app.renderer);
   scene = new ClubScene(textures, club);
   scene.onBeat = (index) => audio.beat(index);
+  if (!persistent) scene.pinCrowd(STRESS_CROWD);
   stage.world.addChild(scene.view);
 
   // --- publishing ---------------------------------------------------------
@@ -320,6 +386,7 @@ export async function startGame(parent: HTMLElement): Promise<GameRuntime> {
     scene = new ClubScene(textures, club);
     scene.onBeat = (index) => audio.beat(index);
     scene.setReducedMotion(store.getState().reducedMotion);
+    if (!persistent) scene.pinCrowd(STRESS_CROWD);
     stage.world.addChild(scene.view);
   }
 
@@ -513,6 +580,22 @@ export async function startGame(parent: HTMLElement): Promise<GameRuntime> {
   }
 
   return {
+    debug: {
+      renderer: () => stage?.app.renderer ?? null,
+      canvas: () => stage?.app.canvas ?? null,
+      counts: (out) => {
+        if (scene === null) {
+          out.guests = 0;
+          out.bartenders = 0;
+          out.queues = 0;
+          out.particles = 0;
+          return;
+        }
+        scene.countRendered(out);
+      },
+      frames: () => probe.report(),
+    },
+
     destroy: () => {
       running = false;
       cancelAnimationFrame(rafHandle);

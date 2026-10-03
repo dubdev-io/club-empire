@@ -1,0 +1,76 @@
+# Publish the static build so it can be opened on a phone (DUB-9).
+#
+# The whole point of this file is DUB-8: the frame rate gets measured on the
+# owner's own iPhone in Safari, and that needs a URL rather than a dev server on
+# someone's laptop. Nothing here costs money — GitHub Pages and GitHub-hosted
+# runners only.
+#
+# Status at the time this landed: **Pages is refused on this repository.**
+#
+#   POST /repos/dubdev-io/club-empire/pages  ->  HTTP 422
+#   {"message":"Your current plan does not support GitHub Pages for this
+#    repository.", "status":"422"}
+#
+# The repo is private and the org is on a plan where Pages is a public-repo-only
+# feature. Changing the repository's visibility is explicitly out of scope for
+# this ticket, so the workflow is committed ready to run and the hosting
+# decision sits with the owner (see DUB-9). The moment Pages is enabled — by
+# making the repo public, or on a plan that allows private Pages — this runs as
+# it stands, with no edit.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  # So the first deploy can be kicked off by hand the moment Pages is enabled,
+  # without waiting for the next commit to main.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel one that is already publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` rather than `npm install`: the lockfile is the build input and
+      # a deploy that quietly resolves a different dependency tree than the one
+      # that was reviewed is not a reproducible build.
+      - run: npm ci
+
+      # The gate is the same one the README states: typecheck, tests, build.
+      # A published URL that the owner opens on a phone is the most expensive
+      # possible place to discover a type error.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

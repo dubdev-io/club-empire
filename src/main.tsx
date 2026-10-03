@@ -33,6 +33,8 @@ if (import.meta.env.DEV) {
   (window as unknown as { __clubStore?: unknown }).__clubStore = useGameStore;
 }
 
+const params = new URLSearchParams(window.location.search);
+
 /**
  * `?noboot=1` loads the page without starting the game. Dev only.
  *
@@ -42,19 +44,53 @@ if (import.meta.env.DEV) {
  * and the seed is gone before the reload reads it — which is exactly how the
  * offline-return screenshot came out showing the previous shot's club.
  */
-const NO_BOOT = import.meta.env.DEV && new URLSearchParams(location.search).has('noboot');
+const NO_BOOT = import.meta.env.DEV && params.has('noboot');
+
+/**
+ * The two measurement flags (DUB-9).
+ *
+ * Unlike `noboot`, these are *not* behind `import.meta.env.DEV`. That is the
+ * point of the ticket: every existing hook is dev-only and so is eliminated
+ * from `dist`, which left QA measuring a production bundle in which none of
+ * the deterministic routes into a test state exist. These two have to work on
+ * the published build.
+ *
+ * `stress=1` is only honoured alongside `debug=1`, on purpose: the stress
+ * scene replaces the club with a fixture and must not be reachable by a stray
+ * link. It still never writes the save (see `StartOptions`), but requiring both
+ * flags means the only way to see it is to have asked for it.
+ */
+const debugRequested = params.get('debug') === '1';
+const stressRequested = debugRequested && params.get('stress') === '1';
 
 // The Pixi runtime deliberately lives outside React. React re-renders are not
 // a safe place to own a WebGL context, and StrictMode's double-invoked effects
 // would create two of them in development.
 if (!NO_BOOT) {
-  void startGame(gameRoot).catch((error: unknown) => {
-  console.error('Club Empire failed to start', error);
-  // Whatever went wrong, the player must not be left looking at a boot
-  // spinner forever. `startGame` already handles the WebGL case specifically;
-  // this is the catch-all for anything else, and it names the problem rather
-  // than showing a dark screen with no explanation.
-    useGameStore.getState().setWebglUnavailable(true);
-    useGameStore.getState().setBooting(false, 1);
-  });
+  void startGame(gameRoot, { stress: stressRequested }).then(
+    (runtime) => {
+      if (!debugRequested) return;
+      // Dynamic, and reached only behind the flag — so Rolldown emits the
+      // overlay as its own chunk and the browser never fetches it in normal
+      // play. This is the whole of acceptance criterion 1.
+      void import('./debug/overlay.ts')
+        .then(({ mountDebugOverlay }) => {
+          mountDebugOverlay(runtime, { build: __CLUB_BUILD__, stress: stressRequested });
+        })
+        .catch((error: unknown) => {
+          // A dead instrument, not a dead game: the club keeps running and the
+          // player (or the owner, on the wrong network) just has no read-out.
+          console.error('Club Empire debug overlay failed to load', error);
+        });
+    },
+    (error: unknown) => {
+      console.error('Club Empire failed to start', error);
+      // Whatever went wrong, the player must not be left looking at a boot
+      // spinner forever. `startGame` already handles the WebGL case specifically;
+      // this is the catch-all for anything else, and it names the problem rather
+      // than showing a dark screen with no explanation.
+      useGameStore.getState().setWebglUnavailable(true);
+      useGameStore.getState().setBooting(false, 1);
+    },
+  );
 }
