@@ -50,6 +50,14 @@ export default tseslint.config(
   },
 
   {
+    // `tools/` holds Node CLI scripts (see tools/tsconfig.json). They run in
+    // Node, and printing a report to stdout is the entire point of them.
+    files: ['tools/**/*.ts'],
+    languageOptions: { globals: globals.node },
+    rules: { 'no-console': 'off' },
+  },
+
+  {
     files: ['**/*.test.ts'],
     rules: {
       // Test fixtures deliberately feed malformed data into the save codec.

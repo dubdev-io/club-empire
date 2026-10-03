@@ -8,9 +8,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tools",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "sim:economy": "node tools/economy-sim.ts"
   },
   "dependencies": {
     "pixi.js": "8.22.0",
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@types/node": "24.19.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",

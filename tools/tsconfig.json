@@ -1,0 +1,17 @@
+{
+  // Scripts in `tools/` run under Node, not the browser, so they need Node
+  // types and no DOM. Kept as its own tsconfig rather than widening the root
+  // `include` so the game sources cannot accidentally reach for `process`.
+  //
+  // It also has to live *here* rather than as a root `tsconfig.tools.json`:
+  // typescript-eslint's project service resolves the nearest ancestor
+  // `tsconfig.json`, and would otherwise refuse to lint these files.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext"
+  },
+  "include": ["."]
+}
