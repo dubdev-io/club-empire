@@ -14,6 +14,15 @@
  *  - **Allocation-free.** A probe that allocates changes the thing it is
  *    measuring — GC pauses are exactly what the tail is made of. Samples go
  *    into pre-sized ring buffers.
+ *  - **Duty cycle alongside frame time.** The sim is fixed-step at 10 Hz with
+ *    catch-up, so the work done per frame is proportional to how long the
+ *    frame lasted: on a slow rasteriser `avgFrameMs` measures the rasteriser,
+ *    not the code. QA measured a 3.4x spread from `deviceScaleFactor` alone
+ *    with the build held constant. Main-thread busy ms per second of wall
+ *    clock does not move with frame duration, so that is the figure DUB-6
+ *    gates on. It is accumulated over the whole window rather than kept in the
+ *    ring buffer, because a ring that wrapped would silently narrow the
+ *    denominator.
  *
  * What it cannot tell you: anything GPU-side. `app.render()` returns when the
  * commands are *submitted*, not when they are done, so the `gpu` phase here is
@@ -50,6 +59,14 @@ export interface FrameReport {
   /** Frames that took longer than 16.6 ms, as a percentage of the window. */
   readonly overBudgetPercent: number;
   readonly phases: Record<Phase, PhaseReport>;
+  /** Main-thread ms spent inside the game frame since the last `reset()`. */
+  readonly busyMs: number;
+  /** Wall-clock ms since the last `reset()`. The denominator of the duty cycle. */
+  readonly wallMs: number;
+  /** `busyMs` per second of wall clock. DUB-6's gating figure, unnormalised. */
+  readonly busyMsPerSecond: number;
+  /** The same figure as a percentage. DUB-6 gates at <= 18 % at 1x, <= 72 % at 4x. */
+  readonly busyPercent: number;
 }
 
 export class FrameProbe {
@@ -64,6 +81,16 @@ export class FrameProbe {
 
   private frameStart = 0;
   private phaseStart = 0;
+
+  /**
+   * Duty-cycle accounting. Kept as running totals rather than in the ring
+   * buffer: the window the overlay measures over is 60 s, which at 120 Hz is
+   * thirty times `WINDOW`, and a wrapped ring would quietly change the
+   * denominator from "the measurement" to "the last four seconds".
+   */
+  private busyMs = 0;
+  private windowStartedAt = performance.now();
+  private windowEndedAt = this.windowStartedAt;
 
   constructor() {
     this.samples = {
@@ -87,16 +114,28 @@ export class FrameProbe {
   }
 
   endFrame(): void {
-    this.frameSamples[this.cursor] = performance.now() - this.frameStart;
+    const now = performance.now();
+    const elapsed = now - this.frameStart;
+    this.frameSamples[this.cursor] = elapsed;
     this.cursor = (this.cursor + 1) % WINDOW;
     if (this.filled < WINDOW) this.filled += 1;
     this.frames += 1;
+
+    // The whole `beginFrame` -> `endFrame` span is main-thread time the game
+    // took: everything between the two is synchronous. Anything the browser
+    // does outside it — compositing, the overlay's own rAF hook, idle — is
+    // correctly not counted as the game being busy.
+    this.busyMs += elapsed;
+    this.windowEndedAt = now;
   }
 
   reset(): void {
     this.cursor = 0;
     this.filled = 0;
     this.frames = 0;
+    this.busyMs = 0;
+    this.windowStartedAt = performance.now();
+    this.windowEndedAt = this.windowStartedAt;
   }
 
   report(): FrameReport {
@@ -116,10 +155,21 @@ export class FrameProbe {
           publish: EMPTY_PHASE,
           gpu: EMPTY_PHASE,
         },
+        busyMs: 0,
+        wallMs: 0,
+        busyMsPerSecond: 0,
+        busyPercent: 0,
       };
     }
 
     const frame = this.summarise(this.frameSamples, n);
+
+    // Measured to the end of the last frame, not to "now". Both the overlay
+    // and QA read this after freezing the display, and a denominator that
+    // kept growing while nothing was being rendered would walk the duty cycle
+    // down towards zero the longer you looked at it.
+    const wallMs = this.windowEndedAt - this.windowStartedAt;
+    const busyMsPerSecond = wallMs > 0 ? (this.busyMs / wallMs) * 1000 : 0;
 
     let overBudget = 0;
     for (let i = 0; i < n; i += 1) {
@@ -142,6 +192,10 @@ export class FrameProbe {
         publish: this.summarise(this.samples.publish, n),
         gpu: this.summarise(this.samples.gpu, n),
       },
+      busyMs: this.busyMs,
+      wallMs,
+      busyMsPerSecond,
+      busyPercent: busyMsPerSecond / 10,
     };
   }
 

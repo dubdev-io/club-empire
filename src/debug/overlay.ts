@@ -24,6 +24,15 @@
  * honest number* off a real phone, which a plausible-looking fabrication would
  * defeat.
  *
+ * **4. The gating number is `busy_pct`, not `fps`.** QA showed the container
+ * frame rate moves 3.4x on `deviceScaleFactor` alone with the build held
+ * constant, so it cannot carry a build-to-build regression gate. Main-thread
+ * busy ms per second of wall clock can, and the sim being fixed-step is
+ * exactly why: the work per wall-clock second is the invariant and the work
+ * per frame is not. `fps` stays, because on the owner's iPhone it is a real
+ * device number and this ticket exists to get one — but it has to be read
+ * next to `dpr` and `canvas_px` to mean anything, which is why they are here.
+ *
  * Field names are a contract: QA reads them off this overlay for the DUB-6 C1
  * frame-budget numbers. They are listed in the README and must not be renamed
  * without saying so on DUB-6.
@@ -144,6 +153,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     const elapsedMs = (frozen && measureUntil !== null ? measureUntil : now) - windowStart;
     const canvas = debug.canvas();
     const frames = debug.frames();
+    const domParticles = confettiPieces();
 
     const n = sampleCount;
     let sum = 0;
@@ -181,11 +191,20 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       ['frame_ms_mean', n > 0 ? fixed(sum / n, 2) : 'n/a'],
       ['frame_ms_max', n > 0 ? fixed(max, 2) : 'n/a'],
       ['refresh_cap_hz', peakFps > 0 ? String(Math.round(peakFps)) : 'n/a'],
+      // The gating figure for DUB-6's C1 regression gate. Reported from the
+      // game's own probe, not from this module's rAF hook: the hook can see
+      // how long a frame lasted but not how much of it the game spent
+      // working, and the gap between those two is the entire point.
+      ['busy_pct', fixed(frames.busyPercent, 1)],
+      ['busy_ms_per_s', fixed(frames.busyMsPerSecond, 1)],
+      ['busy_window_s', fixed(frames.wallMs / 1000, 1)],
       ['draw_calls', drawCalls === null ? 'n/a' : String(drawCalls.lastFrame)],
       ['guests_rendered', String(counts.guests)],
       ['bartenders_rendered', String(counts.bartenders)],
       ['queues_rendered', String(counts.queues)],
-      ['particles_rendered', String(counts.particles)],
+      ['particles_rendered', String(counts.particles + domParticles)],
+      ['particles_canvas', String(counts.particles)],
+      ['particles_dom', String(domParticles)],
       ['dpr', fixed(window.devicePixelRatio || 1, 2)],
       ['canvas_px', canvas === null ? 'n/a' : `${canvas.width}x${canvas.height}`],
       [
@@ -243,6 +262,9 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     windowStart = now;
     lastFrameAt = now;
     drawCalls?.reset();
+    // Put the duty-cycle window on the same 60 s as everything else here, so
+    // `busy_pct` and `fps` in one report describe the same stretch of time.
+    debug.resetFrames();
   }
 
   // --- buttons ------------------------------------------------------------
@@ -375,6 +397,23 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       style.remove();
     },
   };
+}
+
+/**
+ * Confetti pieces currently in the DOM.
+ *
+ * The star-celebration confetti is not a canvas particle system: it is twelve
+ * CSS-animated `<span>`s in the React overlay layer (`ui/Overlays.tsx`), so a
+ * GL-side probe reads zero for it even mid-celebration and a 60-particle cap
+ * checked against the canvas alone is a false pass. Counted rather than
+ * derived, because QA cross-checks this field against an independent probe
+ * and an estimate that disagreed would be indistinguishable from a defect.
+ *
+ * This is a DOM count and is reported separately as `particles_dom` for that
+ * reason: the day a Pixi emitter is added, only `particles_canvas` moves.
+ */
+function confettiPieces(): number {
+  return document.getElementsByClassName('confetti__piece').length;
 }
 
 /** Last-resort clipboard path for browsers that refuse the async API. */

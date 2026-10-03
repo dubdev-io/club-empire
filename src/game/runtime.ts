@@ -78,7 +78,7 @@ export interface StartOptions {
   readonly stress?: boolean;
 }
 
-/** What the debug overlay is allowed to see. Deliberately four narrow holes. */
+/** What the debug overlay is allowed to see. Deliberately five narrow holes. */
 export interface GameDebugHandle {
   /** The Pixi renderer, for draw-call counting. Null when WebGL was refused. */
   renderer(): Renderer | null;
@@ -86,8 +86,17 @@ export interface GameDebugHandle {
   canvas(): HTMLCanvasElement | null;
   /** Live sprite counts, written into `out` so sampling allocates nothing. */
   counts(out: RenderCounts): void;
-  /** Per-system frame timing, for the DUB-6 C1 breakdown. */
+  /** Per-system frame timing and the duty cycle, for the DUB-6 C1 breakdown. */
   frames(): FrameReport;
+  /**
+   * Restart the timing window.
+   *
+   * The overlay calls this when "Start 60 s measurement" is tapped, so that
+   * `busy_pct` is the duty cycle *of that measurement* rather than of however
+   * long the page happened to have been open. Without it the two windows
+   * drift apart and the number stops being comparable between runs.
+   */
+  resetFrames(): void;
 }
 
 /**
@@ -190,6 +199,7 @@ export async function startGame(
           out.particles = 0;
         },
         frames: () => probe.report(),
+        resetFrames: () => probe.reset(),
       },
     };
   }
@@ -594,6 +604,7 @@ export async function startGame(
         scene.countRendered(out);
       },
       frames: () => probe.report(),
+      resetFrames: () => probe.reset(),
     },
 
     destroy: () => {
