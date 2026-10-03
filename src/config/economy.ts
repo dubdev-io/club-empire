@@ -210,6 +210,26 @@ export const LAST_CALL_MULTIPLIER = 3;
 
 export const LAST_CALL_DURATION_SECONDS = 30;
 
+/**
+ * Share of arrivals turned away before the HUD raises a queue *warning*.
+ *
+ * The queue itself is always drawn — it is the diagnostic and the whole reason
+ * this is a nightclub and not a spreadsheet. This threshold governs only the
+ * amber `⚠` banner, which is a different thing: an alarm.
+ *
+ * It exists because the §4.4 economy is capacity-bound for **93.2% of the run**
+ * (DUB-4's own bottleneck split), and a fresh club serves 0.50 guests/s against
+ * 0.90 arriving — so a banner that fired whenever the `min()` binds would be on
+ * screen almost permanently, from the first second, telling the player to buy a
+ * lane they cannot afford for three and a half minutes. A permanent alarm is
+ * not a diagnostic, it is nagging, and the brief rules out nagging copy.
+ *
+ * At 0.5 the banner means "you are turning away more guests than you serve",
+ * which is the distinct `queue-overflow` state Phase 1 scope item 12 asks for
+ * rather than the ordinary condition of play.
+ */
+export const QUEUE_WARNING_SHARE = 0.5;
+
 // ---------------------------------------------------------------------------
 // Offline earnings (§5)
 // ---------------------------------------------------------------------------

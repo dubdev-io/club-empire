@@ -31,6 +31,11 @@
 // Changing a balance number means editing that file and re-running this script.
 
 import {
+  CLUB_COMPLETE_LABEL,
+  MILESTONES,
+  type Milestone,
+} from '../src/config/pacing.ts';
+import {
   AVERAGE_SPEND_MULTIPLIER,
   COST_GROWTH,
   DOOR_ARRIVAL_GROWTH,
@@ -43,6 +48,7 @@ import {
   STATION_DEFS,
   doorUpgradeCost,
   incomePerSecond as incomeOf,
+  type ClubProgress,
   laneCost as laneCostOf,
   stationCapacity,
   type StationDef,
@@ -265,68 +271,33 @@ function bestPurchase(s: State): Choice | null {
 // Milestones (§4.4 table)
 // ---------------------------------------------------------------------------
 
-interface Milestone {
-  label: string;
-  expectedMinutes: number;
-  expectedIncome: number;
-  met: (s: State) => boolean;
+/**
+ * The §4.4 table is imported, not restated.
+ *
+ * `src/config/pacing.ts` holds the one copy, shared with `tools/autobuy.ts`,
+ * which runs the same table against the shipping `ClubState`. Two verifiers
+ * with two private copies of the expectations could both pass while disagreeing
+ * with each other, which is the one outcome acceptance criterion 1 must not
+ * allow.
+ */
+const CLUB_COMPLETE = CLUB_COMPLETE_LABEL;
+
+/** Adapt the sim's mutable `State` to the `ClubProgress` the predicates take. */
+function progressOf(s: State): ClubProgress {
+  return {
+    doorLevel: s.door,
+    stations: s.stations.map((st) => ({
+      key: st.def.key,
+      unlocked: st.unlocked,
+      level: st.level,
+      lanes: st.lanes,
+    })),
+  };
 }
 
-const MILESTONES: readonly Milestone[] = [
-  { label: 'Tap L12', expectedMinutes: 1, expectedIncome: 5.2, met: (s) => station(s, 'tap').level >= 12 },
-  { label: 'Tap L17', expectedMinutes: 2, expectedIncome: 7.9, met: (s) => station(s, 'tap').level >= 17 },
-  { label: 'Tap L22', expectedMinutes: 3, expectedIncome: 24.4, met: (s) => station(s, 'tap').level >= 22 },
-  {
-    label: 'Tap lane 2 + Door L2',
-    expectedMinutes: 3.5,
-    expectedIncome: 58,
-    met: (s) => station(s, 'tap').lanes >= 2 && s.door >= 2,
-  },
-  { label: 'Cocktail Bar unlocked', expectedMinutes: 4.4, expectedIncome: 91, met: (s) => station(s, 'cocktail').unlocked },
-  {
-    label: 'Tap L29, Cocktail L12, Door L4',
-    expectedMinutes: 5,
-    expectedIncome: 120,
-    met: (s) => station(s, 'tap').level >= 29 && station(s, 'cocktail').level >= 12 && s.door >= 4,
-  },
-  { label: 'Tap Bar maxed L30 ***', expectedMinutes: 6, expectedIncome: 251, met: (s) => station(s, 'tap').level >= 30 },
-  {
-    label: 'Tap lane 3 + Door L5',
-    expectedMinutes: 6.3,
-    expectedIncome: 416,
-    met: (s) => station(s, 'tap').lanes >= 3 && s.door >= 5,
-  },
-  {
-    label: 'Cocktail lane 2 + Door L6',
-    expectedMinutes: 7.3,
-    expectedIncome: 641,
-    met: (s) => station(s, 'cocktail').lanes >= 2 && s.door >= 6,
-  },
-  { label: 'Booth Service unlocked', expectedMinutes: 9, expectedIncome: 839, met: (s) => station(s, 'booth').unlocked },
-  {
-    label: 'Tap 30 / Cocktail 29 / Booth 14, Door L7',
-    expectedMinutes: 10,
-    expectedIncome: 1033,
-    met: (s) =>
-      station(s, 'tap').level >= 30 && station(s, 'cocktail').level >= 29 && station(s, 'booth').level >= 14 && s.door >= 7,
-  },
-  {
-    label: 'Booth L27, Cocktail lane 3, Door L8',
-    expectedMinutes: 15,
-    expectedIncome: 3298,
-    met: (s) => station(s, 'booth').level >= 27 && station(s, 'cocktail').lanes >= 3 && s.door >= 8,
-  },
-  {
-    label: 'All L30, all 3 lanes, Door L8 — CLUB COMPLETE',
-    expectedMinutes: 20,
-    expectedIncome: 11783,
-    met: (s) =>
-      s.door >= DOOR_MAX &&
-      s.stations.every((st) => st.unlocked && st.level >= MAX_STATION_LEVEL && st.lanes >= MAX_LANES),
-  },
-];
-
-const CLUB_COMPLETE = 'All L30, all 3 lanes, Door L8 — CLUB COMPLETE';
+function milestoneMet(m: Milestone, s: State): boolean {
+  return m.met(progressOf(s));
+}
 
 // ---------------------------------------------------------------------------
 // Run
@@ -356,7 +327,7 @@ let elapsed = 0;
 
 function recordMilestones(): void {
   for (const m of MILESTONES) {
-    if (!reached.has(m.label) && m.met(state)) {
+    if (!reached.has(m.label) && milestoneMet(m, state)) {
       reached.set(m.label, { seconds: elapsed, income: incomePerSecond(state) });
     }
   }

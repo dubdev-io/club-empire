@@ -596,5 +596,36 @@ function installDevHooks(deps: {
       publishFast(true);
       return club.cash;
     },
+
+    /**
+     * Buy everything, for reaching the club-complete state directly.
+     *
+     * Goes through the real purchase functions rather than writing levels into
+     * the state, so the screenshots and the manual checks exercise the same
+     * code a player would — including the ★ queue and the complete trigger.
+     */
+    buyAll: () => {
+      creditCash(club, 1e12);
+      for (let guard = 0; guard < 500; guard += 1) {
+        const next = club.derived.nextPurchase;
+        if (next === null) break;
+        if (applyPurchase(club, next) !== 'bought') break;
+      }
+      afterPurchase();
+      return { purchases: club.purchaseCount, complete: club.derived.complete };
+    },
+
+    /**
+     * Raise the Door without touching lanes, to force a queue.
+     *
+     * The fastest way to see the queue-overflow state, and a legitimate thing a
+     * player can do to themselves — which is the point of rendering it.
+     */
+    floodDoor: () => {
+      creditCash(club, 1e9);
+      for (let i = 0; i < 20; i += 1) upgradeDoor(club);
+      afterPurchase();
+      return club.derived.flow.turnedAwayPerSecond;
+    },
   };
 }

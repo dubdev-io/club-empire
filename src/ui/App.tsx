@@ -67,19 +67,32 @@ export function App(): React.JSX.Element {
 }
 
 /**
- * Orientation.
+ * Should the rotate prompt be showing?
  *
- * Driven off an aspect-ratio media query rather than `screen.orientation`,
- * which is unimplemented on iOS Safari, and rather than comparing
- * `innerWidth`/`innerHeight`, which flips briefly during the keyboard
- * animation and would flash the rotate prompt at a player who did nothing.
+ * §9 says portrait only, and in landscape show a rotate prompt rather than
+ * attempting a landscape layout. But the brief *also* says the game must not be
+ * broken at 1440x900, and the designer reviews it at that size — and a desktop
+ * monitor is landscape. Showing "turn your phone upright" to someone at a
+ * 1440x900 window is the broken outcome, not the compliant one.
+ *
+ * So the condition is landscape **and short**: a phone on its side is about
+ * 390 px tall, where a desktop window has room to letterbox the 390x844 design
+ * comfortably. Under 600 px of height there is no way to show the portrait
+ * layout, and the prompt is the only honest answer; above it, render the game.
+ *
+ * Driven off a media query rather than `screen.orientation`, which iOS Safari
+ * does not implement, and rather than comparing `innerWidth`/`innerHeight`,
+ * which flips briefly during the keyboard animation and would flash the prompt
+ * at a player who did nothing.
  */
+const ROTATE_QUERY = '(min-aspect-ratio: 1/1) and (max-height: 599px)';
+
 function useLandscape(): boolean {
-  const [landscape, setLandscape] = useState(() => matchLandscape());
+  const [landscape, setLandscape] = useState(matchRotatePrompt);
 
   useEffect(() => {
-    const query = window.matchMedia('(max-aspect-ratio: 1/1)');
-    const update = (): void => setLandscape(!query.matches);
+    const query = window.matchMedia(ROTATE_QUERY);
+    const update = (): void => setLandscape(query.matches);
     query.addEventListener('change', update);
     update();
     return () => query.removeEventListener('change', update);
@@ -88,9 +101,9 @@ function useLandscape(): boolean {
   return landscape;
 }
 
-function matchLandscape(): boolean {
+function matchRotatePrompt(): boolean {
   if (typeof window === 'undefined') return false;
-  return !window.matchMedia('(max-aspect-ratio: 1/1)').matches;
+  return window.matchMedia(ROTATE_QUERY).matches;
 }
 
 /**

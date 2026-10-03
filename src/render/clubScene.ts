@@ -97,12 +97,13 @@ interface StationArt {
   readonly counter: Sprite;
   readonly backBar: Sprite;
   readonly bottles: Sprite[];
+  readonly shelves: Sprite[];
   readonly neonSign: Sprite;
   readonly pips: Sprite[];
   /** One per possible lane. Body + head, so a bartender reads at 28 px. */
   readonly bartenders: { body: Sprite; head: Sprite }[];
   readonly queue: { body: Sprite; head: Sprite }[];
-  readonly lockGlyph: Sprite;
+  readonly lockGlyph: Container;
   /**
    * How many of this station's lanes are actually working, fractional.
    *
@@ -212,19 +213,19 @@ export class ClubScene {
     booth.position.set(265, BACK_WALL.y + 96);
     booth.setSize(96, 34);
 
-    this.djGlow = sprite(this.view, textures.disc, NEON_MAGENTA);
+    this.djGlow = sprite(this.view, textures.glow, NEON_MAGENTA);
     this.djGlow.anchor.set(0.5);
     this.djGlow.position.set(265, BACK_WALL.y + 64);
-    this.djGlow.setSize(130, 130);
-    this.djGlow.alpha = 0.3;
+    this.djGlow.setSize(190, 190);
+    this.djGlow.alpha = 0.85;
     this.djGlow.blendMode = 'add';
 
     // --- door -------------------------------------------------------------
-    this.doorGlow = sprite(this.view, textures.disc, NEON_CYAN);
+    this.doorGlow = sprite(this.view, textures.glow, NEON_CYAN);
     this.doorGlow.anchor.set(0.5);
     this.doorGlow.position.set(DOOR.x + DOOR.width / 2, DOOR.y + DOOR.height / 2);
-    this.doorGlow.setSize(120, 120);
-    this.doorGlow.alpha = 0.22;
+    this.doorGlow.setSize(150, 150);
+    this.doorGlow.alpha = 0.6;
     this.doorGlow.blendMode = 'add';
 
     this.doorFrame = sprite(this.view, textures.block, NEON_CYAN);
@@ -232,9 +233,16 @@ export class ClubScene {
     this.doorFrame.setSize(DOOR.width, DOOR.height);
     this.doorFrame.alpha = 0.5;
 
-    const doorMouth = sprite(this.view, textures.block, 0x0b0a14);
-    doorMouth.position.set(DOOR.x + 4, DOOR.y + 4);
-    doorMouth.setSize(DOOR.width - 8, DOOR.height - 4);
+    const doorMouth = sprite(this.view, textures.block, BG_SURFACE);
+    doorMouth.position.set(DOOR.x + 5, DOOR.y + 5);
+    doorMouth.setSize(DOOR.width - 10, DOOR.height - 5);
+
+    // A sill on the floor side, so the entrance reads as something guests walk
+    // out of rather than a window cut into the wall.
+    const doorSill = sprite(this.view, textures.block, NEON_CYAN);
+    doorSill.position.set(DOOR.x - 4, DOOR.y + DOOR.height - 3);
+    doorSill.setSize(DOOR.width + 8, 3);
+    doorSill.alpha = 0.8;
 
     // The door queue trails away from the entrance along the back wall. Static
     // positions: a queue is read, not animated, and a line of people shuffling
@@ -263,7 +271,7 @@ export class ClubScene {
         const tile = sprite(this.view, textures.block, FLOOR_TILE_REST);
         tile.position.set(DANCE_FLOOR.x + col * tileW + 1.5, DANCE_FLOOR.y + row * tileH + 1.5);
         tile.setSize(tileW - 3, tileH - 3);
-        tile.alpha = 0.55;
+        tile.alpha = 0.9;
         this.floorTiles.push(tile);
       }
     }
@@ -299,6 +307,13 @@ export class ClubScene {
       this.dancerRings.push(ring);
       this.spawnDancer(i);
     }
+
+    // `spawnDancer` makes each one visible, so after seeding the pool every
+    // sprite is on screen. Telling `setDancerCount` the pool is currently full
+    // is what makes its hide-loop run on the first call; without this the
+    // guests above the target stayed visible, frozen at their spawn positions,
+    // because the loop ran from an `activeDancers` of 0.
+    this.activeDancers = MAX_RENDERED_GUESTS;
 
     // --- the next-purchase outline ---------------------------------------
     this.outline = new Container();
@@ -541,7 +556,7 @@ export class ClubScene {
   private advanceBeat(lastCall: boolean): void {
     const previous = this.floorTiles[this.litTile]!;
     previous.tint = FLOOR_TILE_REST;
-    previous.alpha = 0.55;
+    previous.alpha = 0.9;
 
     // A pseudo-random walk rather than a raster scan — a sweeping row reads as
     // a loading bar, a scatter reads as lights.
@@ -671,17 +686,17 @@ export class ClubScene {
     // --- room ambience ----------------------------------------------------
     if (!this.reducedMotion) {
       const pulse = Math.sin((this.tickCount + alpha) * 0.22);
-      this.djGlow.alpha = (lastCall ? 0.42 : 0.28) + pulse * 0.08;
-      this.djGlow.setSize(130 + pulse * 10, 130 + pulse * 10);
+      this.djGlow.alpha = (lastCall ? 1 : 0.8) + pulse * 0.12;
+      this.djGlow.setSize(190 + pulse * 16, 190 + pulse * 16);
       // A single-sprite parallax drift; §11's answer to a busier room.
       for (let i = 0; i < this.crowdStrips.length; i += 1) {
         this.crowdStrips[i]!.y = BACK_WALL.y + 92 + Math.sin((this.tickCount + alpha) * 0.1 + i) * 1.6;
       }
     } else {
-      this.djGlow.alpha = lastCall ? 0.42 : 0.28;
+      this.djGlow.alpha = lastCall ? 1 : 0.8;
     }
 
-    this.doorGlow.alpha = 0.18 + Math.min(0.35, state.derived.flow.arrivalsPerSecond * 0.05);
+    this.doorGlow.alpha = 0.5 + Math.min(0.45, state.derived.flow.arrivalsPerSecond * 0.12);
   }
 
   private renderOutline(frameDeltaMs: number): void {
@@ -701,7 +716,11 @@ export class ClubScene {
     const innerHeight = OUTLINE_SIZE.height - 6;
     this.outlineFill.setSize(OUTLINE_SIZE.width - 6, Math.max(0.5, innerHeight * progress));
     this.outlineFill.position.set(0, innerHeight / 2);
-    this.outlineFill.alpha = affordable ? 0.3 : 0.2;
+    // Always --neon-cyan at 20%, affordable or not. §4.4b moves the *outline*
+    // and the price label on affordability, not the fill — and a fill that
+    // flips to --cash-green at full height stops being a progress signal and
+    // starts being a green block over the station art.
+    this.outlineFill.alpha = 0.2;
 
     // Dotted -> solid on affordability over 180 ms, driven by the real frame
     // delta. Crossfading the dashed frame against a solid twin is how a
@@ -721,7 +740,6 @@ export class ClubScene {
       edge.alpha = t;
       edge.tint = tint;
     }
-    this.outlineFill.tint = tint;
   }
 
   private renderHint(alpha: number): void {
@@ -826,17 +844,30 @@ export class ClubScene {
     backBar.setSize(slot.width, slot.height - 18);
 
     const bar = backBarArea(key);
+
+    // Two shelves, drawn first so the bottles stand *on* them. Without these
+    // the bottles read as hanging from the top of the slot rather than being
+    // stock on a back bar, which is the one thing they exist to communicate.
+    const shelves: Sprite[] = [];
+    for (let row = 0; row < 2; row += 1) {
+      const shelf = sprite(root, this.textures.block, BG_RAISED);
+      shelf.position.set(bar.x, bar.y + 30 + row * 28);
+      shelf.setSize(bar.width, 2);
+      shelves.push(shelf);
+    }
+
     const bottles: Sprite[] = [];
     for (let i = 0; i < BOTTLES_MAX; i += 1) {
       // Two rows of five, so stock reads as a stocked shelf rather than a bar
-      // chart.
+      // chart. Filled bottom shelf first: a half-stocked bar should look
+      // half-stocked, not top-heavy.
       const col = i % 5;
-      const row = Math.floor(i / 5);
+      const row = i < 5 ? 1 : 0;
       const bottle = sprite(root, this.textures.bottle, i % 2 === 0 ? NEON_VIOLET : NEON_CYAN);
       bottle.anchor.set(0.5, 1);
-      bottle.position.set(bar.x + 10 + col * 19, bar.y + 26 + row * 28);
-      bottle.setSize(9, 24);
-      bottle.alpha = 0.9;
+      bottle.position.set(bar.x + 10 + col * 19, bar.y + 30 + row * 28);
+      bottle.setSize(9, 22);
+      bottle.alpha = 0.95;
       bottle.visible = false;
       bottles.push(bottle);
     }
@@ -877,12 +908,27 @@ export class ClubScene {
       pips.push(pip);
     }
 
-    // A locked station gets a padlock-ish glyph as well as reduced opacity:
-    // §9 forbids signalling state by opacity or colour alone.
-    const lockGlyph = sprite(root, this.textures.block, INK_SECONDARY);
-    lockGlyph.anchor.set(0.5);
-    lockGlyph.position.set(slot.x + slot.width / 2, slot.y + slot.height / 2 - 10);
-    lockGlyph.setSize(18, 14);
+    // A locked station gets a padlock as well as reduced opacity: §9 forbids
+    // signalling state by opacity or colour alone, and an empty dark rectangle
+    // reads as a rendering bug rather than as something to buy.
+    const lockGlyph = new Container();
+    root.addChild(lockGlyph);
+    const lockCentre = { x: slot.x + slot.width / 2, y: slot.y + slot.height / 2 };
+
+    const lockBody = sprite(lockGlyph, this.textures.block, INK_SECONDARY);
+    lockBody.anchor.set(0.5, 0);
+    lockBody.position.set(lockCentre.x, lockCentre.y);
+    lockBody.setSize(28, 22);
+
+    const lockShackle = sprite(lockGlyph, this.textures.ring, INK_SECONDARY);
+    lockShackle.anchor.set(0.5, 0.5);
+    lockShackle.position.set(lockCentre.x, lockCentre.y - 2);
+    lockShackle.setSize(20, 20);
+
+    // The shackle is a full ring; the body covers its lower half, leaving the
+    // upward arc a padlock needs. One fewer baked texture than a dedicated
+    // padlock shape.
+    lockGlyph.addChild(lockBody);
     lockGlyph.visible = false;
 
     return {
@@ -891,6 +937,7 @@ export class ClubScene {
       counter,
       backBar,
       bottles,
+      shelves,
       neonSign,
       pips,
       bartenders,

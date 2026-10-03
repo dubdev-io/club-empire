@@ -1,3 +1,4 @@
+import { QUEUE_WARNING_SHARE } from '../config/economy.ts';
 import { useGameStore } from '../state/store.ts';
 
 /**
@@ -13,6 +14,7 @@ export function BottomBar(): React.JSX.Element {
   const openSheet = useGameStore((s) => s.openSheet);
   const sheet = useGameStore((s) => s.sheet);
   const turnedAway = useGameStore((s) => s.turnedAwayPerSecond);
+  const arrivals = useGameStore((s) => s.arrivalsPerSecond);
   const cash = useGameStore((s) => s.cash);
   const stations = useGameStore((s) => s.stations);
   const doorCost = useGameStore((s) => s.doorCost);
@@ -42,7 +44,7 @@ export function BottomBar(): React.JSX.Element {
         onPointerDown={() => openSheet('door')}
       >
         <span>DOOR</span>
-        {turnedAway > 0.001 ? (
+        {arrivals > 0 && turnedAway / arrivals >= QUEUE_WARNING_SHARE ? (
           <span className="bar-button__warn">
             <span aria-hidden="true">⚠</span>
             <span className="visually-hidden">queue at the door</span>

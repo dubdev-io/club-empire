@@ -57,7 +57,11 @@ body {
 #ui-root {
   position: absolute;
   inset: 0;
-  height: 100dvh;
+  /* Written by src/render/stage.ts on every resize. The fallback is the full
+     viewport, which is what a phone gets anyway. */
+  width: var(--stage-width, 100vw);
+  height: var(--stage-height, 100dvh);
+  margin: auto;
   pointer-events: none;
   display: flex;
   flex-direction: column;

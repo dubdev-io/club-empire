@@ -1,5 +1,5 @@
 import { useGameStore } from '../state/store.ts';
-import { LAST_CALL_DURATION_SECONDS } from '../config/economy.ts';
+import { LAST_CALL_DURATION_SECONDS, QUEUE_WARNING_SHARE } from '../config/economy.ts';
 import { formatCash, formatRate } from './format.ts';
 
 /**
@@ -109,13 +109,22 @@ function LastCallMeter(): React.JSX.Element {
  */
 function QueueWarning(): React.JSX.Element | null {
   const turnedAway = useGameStore((s) => s.turnedAwayPerSecond);
-  if (turnedAway <= 0.001) return null;
+  const arrivals = useGameStore((s) => s.arrivalsPerSecond);
+
+  // The queue on the floor is always drawn; this is the *alarm*, and it waits
+  // until more guests are being turned away than served. See
+  // `QUEUE_WARNING_SHARE` for why: the economy is capacity-bound for 93% of the
+  // run, so an unconditional banner would be permanent nagging rather than a
+  // diagnosis.
+  const share = arrivals > 0 ? turnedAway / arrivals : 0;
+  if (share < QUEUE_WARNING_SHARE) return null;
 
   return (
     <div className="queue-warning" role="status">
       <span aria-hidden="true">⚠</span>
       <span>
-        <strong>Queue at the door</strong> — buy a serving lane
+        <strong>Queue at the door</strong> — {Math.round(share * 100)}% of guests turned away. More
+        serving lanes.
       </span>
     </div>
   );

@@ -108,6 +108,18 @@ export async function createStage(parent: HTMLElement): Promise<Stage> {
     layout.height = screenHeight / scale;
     layout.insetTop = insets.top / scale;
     layout.insetBottom = insets.bottom / scale;
+
+    // Publish the letterboxed rect so the DOM layer can sit exactly on top of
+    // the canvas instead of spanning the window.
+    //
+    // On a phone the two are the same thing and this changes nothing. On a
+    // 1440x900 desktop window the canvas is a 416 px column in the middle and a
+    // full-width HUD would float a cash counter a thousand pixels away from the
+    // club it belongs to — which is the "broken at 1440x900" the brief rules
+    // out, even though desktop is not a designed target.
+    const root = document.documentElement.style;
+    root.setProperty('--stage-width', `${DESIGN_WIDTH * scale}px`);
+    root.setProperty('--stage-height', `${Math.min(screenHeight, DESIGN_HEIGHT * scale)}px`);
   };
 
   applyLayout();

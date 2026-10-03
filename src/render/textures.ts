@@ -24,8 +24,19 @@ import { Graphics, type Renderer, type Texture } from 'pixi.js';
 export interface GeneratedTextures {
   /** 8x8 white square. Scaled into every rectangle: walls, counters, tiles, bars. */
   readonly block: Texture;
-  /** 32px white disc. Lights, glows, bubble bodies, guest heads. */
+  /** 32px white disc. Bubble bodies, guest heads, hard-edged lights. */
   readonly disc: Texture;
+  /**
+   * 128px soft radial glow.
+   *
+   * A hard-edged disc on `blendMode: 'add'` does not read as a light — it reads
+   * as a flat coloured circle, which is exactly what the DJ booth and the door
+   * looked like before this existed. Pixi's `Graphics` has no radial gradient,
+   * so the falloff is baked by stacking concentric circles at low alpha: the
+   * centre accumulates every layer and the rim only the outermost, which is a
+   * gradient by another name and costs one texture.
+   */
+  readonly glow: Texture;
   /** Rounded rect, 24x40. A guest's body — the capsule half of "capsule and circle". */
   readonly capsule: Texture;
   /** Ring outline, 48px. VIP collar, the one-time hint pulse, the Last Call halo. */
@@ -72,6 +83,16 @@ export function createTextures(renderer: Renderer): GeneratedTextures {
   const block = bake((g) => g.rect(0, 0, 8, 8).fill(0xffffff), 1);
 
   const disc = bake((g) => g.circle(16, 16, 16).fill(0xffffff));
+
+  const glow = bake((g) => {
+    const steps = 24;
+    for (let i = steps; i > 0; i -= 1) {
+      // Squared falloff rather than linear: a linear ramp still reads as a
+      // disc with a soft edge, where a light should be mostly bright core.
+      const t = i / steps;
+      g.circle(64, 64, 64 * t).fill({ color: 0xffffff, alpha: 0.055 * (1 - t) + 0.01 });
+    }
+  }, 1);
 
   const capsule = bake((g) => g.roundRect(0, 0, 24, 40, 12).fill(0xffffff));
 
@@ -120,6 +141,7 @@ export function createTextures(renderer: Renderer): GeneratedTextures {
   return {
     block,
     disc,
+    glow,
     capsule,
     ring,
     star,

@@ -33,14 +33,31 @@ export function formatMoney(value: number): string {
     tier += 1;
   }
 
-  // Below a thousand there is no mantissa to be significant about — a cash
-  // counter reading "237.0" would be worse than "237".
-  if (tier === 0) return `${sign}${Math.floor(n)}`;
+  // Under a thousand, keep three significant figures too.
+  //
+  // Flooring here was wrong in the place it mattered most: the opening minute
+  // runs at 1.26/s and the income readout showed "£1/s" through several
+  // upgrades, so the single number that is supposed to prove an upgrade did
+  // something sat still. Above 10 the integer is the right read — nobody needs
+  // "237.41".
+  if (tier === 0) {
+    return `${sign}${n < 10 ? trimZeros(n.toFixed(2)) : String(Math.floor(n))}`;
+  }
 
   // Three significant figures: one before the point for 1-9, two for 10-99,
   // three for 100-999.
   const decimals = n < 10 ? 2 : n < 100 ? 1 : 0;
-  const fixed = n.toFixed(decimals);
+  let fixed = n.toFixed(decimals);
+
+  // `toFixed` can round up across a magnitude: 999.9995 at the thousands tier
+  // becomes "1000", and the counter reads "1000M" where it should read "1B".
+  // Caught on a screenshot, which is the expensive way to find it.
+  if (Number.parseFloat(fixed) >= 1000 && tier < SUFFIXES.length - 1) {
+    n /= 1000;
+    tier += 1;
+    fixed = n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0);
+  }
+
   return `${sign}${trimZeros(fixed)}${SUFFIXES[tier]}`;
 }
 
