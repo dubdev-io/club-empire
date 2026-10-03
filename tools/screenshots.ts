@@ -218,6 +218,11 @@ const SHOTS: readonly Shot[] = [
       window.__club.grant(60000);
       for (let i = 0; i < 14; i++) window.__clubStore.getState().actions.upgradeStation('tap');
       window.__clubStore.getState().actions.unlockStation('cocktail');
+      // Fourteen upgrades crosses Lv 10, so a 800 ms ★ fires while settle is
+      // 700 ms — a race that covered the sheet in roughly half of all runs.
+      // Cleared explicitly, the same way 07 and 11 already do; the ★ has its
+      // own shot and does not belong on top of this one.
+      window.__clubStore.getState().setStar(null);
       window.__clubStore.getState().openSheet('bars');
     `,
     settleMs: 700,
@@ -293,6 +298,49 @@ const SHOTS: readonly Shot[] = [
       window.__clubStore.getState().actions.upgradeStation('tap');
     `,
     settleMs: 300,
+  },
+  {
+    // Every lane bought and the Door maxed, but the stations still at Lv 7.
+    // Door Lv 8 arrives at 3.225/s against 3.167/s of lane capacity, so 0.058/s
+    // is turned away permanently — and the sheet's diagnosis fires on an
+    // absolute threshold, so it advises "more lanes" when every `laneCost` and
+    // `unlockCost` is already `null`. Captured because the fix has to be looked
+    // at, not reasoned about.
+    name: '14-door-dead-end',
+    note: 'DOOR sheet dead end — every lane bought, levels mid-run, and it still says "more lanes"',
+    seed: FRESH,
+    drive: `
+      const s = window.__clubStore.getState();
+      window.__club.grant(1e9);
+      s.actions.unlockStation('cocktail');
+      s.actions.unlockStation('booth');
+      for (const key of ['tap', 'cocktail', 'booth']) {
+        for (let i = 0; i < 2; i++) window.__clubStore.getState().actions.buyLane(key);
+      }
+      for (let i = 0; i < 8; i++) window.__clubStore.getState().actions.upgradeDoor();
+      for (const key of ['tap', 'cocktail', 'booth']) {
+        for (let i = 0; i < 6; i++) window.__clubStore.getState().actions.upgradeStation(key);
+      }
+      window.__clubStore.getState().setStar(null);
+      window.__clubStore.getState().openSheet('door');
+    `,
+    settleMs: 900,
+  },
+  {
+    // The same dead end at full build-out, with the completion card dismissed
+    // so the sheet is readable. This is the state the player is left in
+    // forever, so it is the one the end-state copy has to be judged on.
+    name: '15-door-full-buildout',
+    note: 'DOOR sheet after club complete — the permanent 0.06/s residual, nothing left to buy',
+    seed: FRESH,
+    drive: `
+      window.__club.buyAll();
+      const s = window.__clubStore.getState();
+      s.setShowComplete(false);
+      s.setStar(null);
+      s.openSheet('door');
+    `,
+    settleMs: 900,
   },
 ];
 
