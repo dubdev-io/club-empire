@@ -325,7 +325,7 @@ may be *added*; an existing one keeps both its name and its meaning.
 | **`valid`**           | **`yes`, or `no — <reason>`: whether this report can be used at all. First row. See "The `valid` row"** |
 | `build`               | short commit SHA, substituted at build time; `dev` on the dev server  |
 | `scene`               | `normal`, or `stress` under `stress=1`                                |
-| `state`               | `live`, or `FROZEN` after a 60 s run or a copy                        |
+| `state`               | `live`, or `FROZEN` after a 60 s run or a copy. **`FROZEN` means every field stopped**, not just the display — see "A frozen report is frozen" |
 | `date` / `time`       | when the reading was taken, UTC                                       |
 | `fps`                 | frames in the trailing 1 s                                            |
 | `fps_p1_worst`        | the slowest 1% of frames in the window, as fps (the p99 frame time)   |
@@ -334,7 +334,7 @@ may be *added*; an existing one keeps both its name and its meaning.
 | `refresh_cap_hz`      | highest `fps` seen — says whether iOS capped at 120, 60, or 30 (Low Power Mode) |
 | **`busy_pct`**        | **main-thread busy ms per second of wall clock, as a percentage. DUB-6's gating figure** |
 | `busy_ms_per_s`       | the same figure unnormalised, for arithmetic                          |
-| `busy_window_s`       | wall clock the duty cycle was measured over                           |
+| `busy_window_s`       | wall clock the duty cycle was measured over. **Cross-check it against `elapsed_s`: on a completed run they agree to within a frame** |
 | `draw_calls`          | `gl.draw*` calls in the last frame; `n/a` if the context is not WebGL |
 | `guests_rendered`     | dancers plus every queued guest. §11 caps this at 30                  |
 | `bartenders_rendered` | visible bartenders — one per owned lane on an open station            |
@@ -351,12 +351,12 @@ may be *added*; an existing one keeps both its name and its meaning.
 | `elapsed_s`           | time in the current measurement window                                |
 | `hidden_breaks`       | times the page became hidden while sampling. **Any value > 0 invalidates the run** |
 | `hidden_s`            | total time the page spent hidden during the window                     |
-| `wake_lock`           | `held`, `refused` or `unavailable` — see "Keeping the screen awake"    |
+| `wake_lock`           | `held`, `refused`, `released` or `unavailable`. **Absent until a measurement is armed** — see "Keeping the screen awake" |
 | `window_frames`       | frames sampled in the window (frames spanning a hidden gap are not sampled) |
 | `sim_ms_p95` …        | per-system p95 from `FrameProbe` — which system spent the budget      |
 | `ua`                  | `navigator.userAgent`, verbatim. Last line, full width, soft-wrapped   |
 
-Six of these need a note.
+Seven of these need a note.
 
 ### The `valid` row
 
@@ -401,16 +401,33 @@ read-out during normal play, but a C1 frame budget is only a C1 frame budget if
 it was taken on the C1 floor, and "roughly that busy" is not a scene two people
 can measure the same way twice.
 
-The verdict rules are the one part of the overlay a test can reach without a
-WebGL context — `src/debug/overlay.test.ts` asserts each reason string
-literally, including the precedence order.
+The verdict rules are one of the two parts of the overlay a test can reach
+without a WebGL context — `src/debug/overlay.test.ts` asserts each reason string
+literally, including the precedence order. The other is the freeze latch (see
+"A frozen report is frozen").
 
 ### Keeping the screen awake
 
 "Start 60 s measurement" asks for a `'screen'` wake lock when
 `navigator.wakeLock` exists, and releases it when the window freezes or the
-overlay is destroyed. `wake_lock` reports what happened: `held`, `refused`, or
-`unavailable` on a browser without the API.
+overlay is destroyed. `wake_lock` reports what happened:
+
+| value         | meaning                                                           |
+| ------------- | ----------------------------------------------------------------- |
+| *(no row)*    | no measurement has been armed, so no lock has been asked for      |
+| `held`        | granted, and still held when the window ended                     |
+| `refused`     | the browser declined, or the request is still in flight           |
+| `released`    | granted, then **the browser took it back mid-window** — it does that when the document becomes hidden, so expect `hidden_breaks > 0` alongside it |
+| `unavailable` | this browser has no `navigator.wakeLock`                          |
+
+The row is absent rather than `unavailable` before a measurement is armed: until
+"Start" is tapped there is no outcome to report, and `unavailable` there was the
+panel saying "the API is not here" on every browser that has it. `released`
+exists for the same reason — the browser signals an auto-release only through
+the sentinel's `release` event, and without observing it the field went on
+reading `held` after the OS had taken the lock away. The overlay's *own* release
+at the end of a window does not produce `released`; a window that ran to
+completion with the lock still in hand reads `held`.
 
 This is a mitigation, not a check. The protocol for a device measurement is
 "put the phone down and leave it", and a phone left alone locks its screen —
@@ -429,10 +446,34 @@ duty cycle. `fps` stays on the overlay because on the owner's iPhone it is a
 real device number and that is the whole point of DUB-9 — but it only means
 something read next to `dpr` and `canvas_px`.
 
-"Start 60 s measurement" resets the duty-cycle window too, so `busy_pct` and
-`fps` in one report always describe the same stretch of time. The window closes
-at the last rendered frame rather than at the moment you read it, so the figure
-does not drift while the panel sits frozen.
+"Start 60 s measurement" resets the duty-cycle window too, and freezing the
+panel latches it — so `busy_pct` and `fps` in one report describe the same
+stretch of time, which you can check for yourself: on a completed run
+`busy_window_s` and `elapsed_s` agree to within a frame. See the next section
+for why that is worth checking.
+
+### A frozen report is frozen
+
+`state FROZEN` is a claim about the whole report: every field describes the
+window that ended, and none of them moves again until the next
+"Start 60 s measurement". The duty-cycle trio in particular — `busy_pct`,
+`busy_ms_per_s`, `busy_window_s` — and the four `*_ms_p95` rows come from the
+game's own `FrameProbe`, which keeps running after the panel stops, so they are
+snapshotted at the freeze rather than re-read on each repaint.
+
+**Cross-check `busy_window_s` against `elapsed_s` on any report you are about to
+quote.** On a completed 60 s run they agree to within one frame. If they do not,
+something is wrong with the instrument and not with the formatting — say so
+rather than rounding it off.
+
+This was not true until DUB-12 and the error was in the lenient direction, which
+is why the cross-check is written down. The three `busy_*` fields were read live
+on every repaint, and "Copy report" repaints — so a clean 60 s run copied seven
+seconds later reported `elapsed_s 60.0` beside `busy_window_s 67.1`, and the
+`busy_pct` above it had been divided by seven extra seconds of idle panel. Idle
+time dilutes a duty cycle *downward*, so the slower you were to tap "Copy
+report", the less busy the build looked — roughly 10% low per 7 s of delay, on
+the one figure this section tells you to gate on.
 
 `dpr` and `canvas_px` will disagree on a 3x phone, and that is correct:
 `createStage` caps the renderer resolution at 2 (see "Performance rules this

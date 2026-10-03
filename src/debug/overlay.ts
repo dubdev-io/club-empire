@@ -46,12 +46,28 @@
  * report also turned out to be from desktop Chrome, and the only tells were
  * `canvas_css` and the mere presence of `heap_mb`.
  *
+ * **6. A frozen report is frozen in every field (DUB-12).** Freezing the panel
+ * is a claim about the report, not about the panel: it says "these numbers
+ * describe the window that just ended". Three fields did not honour it.
+ * `busy_pct`, `busy_ms_per_s` and `busy_window_s` were read live from
+ * `debug.frames()` on every repaint, and the game keeps running after the panel
+ * stops — so a 60 s run copied seven seconds later reported `elapsed_s 60.0`
+ * next to `busy_window_s 67.1`, and the duty cycle printed above it had been
+ * diluted by seven seconds of idle. The direction is what makes it serious:
+ * idle time pushes `busy_pct` *down*, and `busy_pct` is the figure DUB-6 gates
+ * on, so the slower you were to tap "Copy report" the better the build looked.
+ * `createWindowFreeze` below is the answer, and the reason it is one object
+ * rather than three more `let`s: the bug was a freeze path that pinned two of
+ * the things it owed and forgot the third, so there is now exactly one place
+ * that can be forgotten and it is covered by a test.
+ *
  * Field names are a contract: QA reads them off this overlay for the DUB-6 C1
  * frame-budget numbers. They are listed in the README and must not be renamed
  * without saying so on DUB-6. New fields may be added; existing ones keep both
  * their name and their meaning.
  */
 
+import type { FrameReport } from '../game/frameProbe.ts';
 import type { GameRuntime } from '../game/runtime.ts';
 import type { RenderCounts } from '../render/clubScene.ts';
 
@@ -203,8 +219,90 @@ export function validityVerdict(measured: MeasurementWindow): string {
   return 'yes';
 }
 
-/** What the screen wake lock did, as reported by `wake_lock`. */
-type WakeLockState = 'held' | 'refused' | 'unavailable';
+/**
+ * Everything a frozen report has to stop reading live.
+ *
+ * There are two ways a window stops — the 60 s deadline and "Copy report" — and
+ * before DUB-12 each of them pinned the window clock by hand and left the
+ * duty-cycle trio to be re-read from `debug.frames()` on the next repaint. That
+ * is not a typo-sized mistake; it is the shape of the code inviting one, and the
+ * second freeze path duly took the invitation. So the latch is a single value
+ * that owns *all* of it: a freeze path either calls `freeze` or it does not, and
+ * there is no way to pin half a report.
+ *
+ * Exported, with the live readout injected as `readFrames`, for the same reason
+ * `validityVerdict` is: `vitest` runs on the node environment, and this is now
+ * the second piece of the overlay that can be checked without a DOM, a WebGL
+ * context or a frame clock instead of by eye on a phone.
+ */
+export interface WindowFreeze {
+  /** True once the window has stopped, whether by deadline or by copy. */
+  readonly frozen: boolean;
+  /**
+   * Stop the window as of `at`.
+   *
+   * Only the first call does anything. A second tap on "Copy report" has to
+   * hand over the report the first tap did — the same `elapsed_s`, the same
+   * `busy_pct` — rather than the same run measured over a longer idle tail.
+   */
+  freeze(at: number): void;
+  /** Reopen for a fresh measurement. */
+  thaw(): void;
+  /** The instant the report describes: the freeze, or `now` while live. */
+  instant(now: number): number;
+  /** The duty-cycle and phase readout the report describes. */
+  frames(): FrameReport;
+}
+
+export function createWindowFreeze(readFrames: () => FrameReport): WindowFreeze {
+  let at: number | null = null;
+  /**
+   * `FrameProbe.report()` builds a fresh object every call and never mutates
+   * one it has handed out, so holding the reference is enough — no copy, and no
+   * risk of the latched numbers being edited underneath us by the next frame.
+   */
+  let latched: FrameReport | null = null;
+
+  return {
+    get frozen(): boolean {
+      return at !== null;
+    },
+    freeze(when: number): void {
+      if (at !== null) return;
+      at = when;
+      latched = readFrames();
+    },
+    thaw(): void {
+      at = null;
+      latched = null;
+    },
+    instant(now: number): number {
+      return at ?? now;
+    },
+    frames(): FrameReport {
+      return latched ?? readFrames();
+    },
+  };
+}
+
+/**
+ * What the screen wake lock did, as reported by `wake_lock`.
+ *
+ * `released` is the DUB-12 addition and it is a distinct outcome, not a tidier
+ * word for `refused`: the browser drops a screen lock by itself when the
+ * document becomes hidden, and without observing the sentinel's `release` event
+ * the field went on claiming `held` after the OS had taken it away. The state
+ * only ever means *the browser* released it — see `releaseWakeLock`, which
+ * detaches the sentinel before releasing so the overlay's own release at the end
+ * of a window does not overwrite the `held` that was true throughout it.
+ *
+ * There is deliberately no fourth state for "not requested yet". Before a
+ * measurement is armed the row is simply absent (see `buildReport`), because
+ * `unavailable` there was the overlay answering a question nobody had asked —
+ * and answering it wrongly, with "the API is not here" on every browser that
+ * has it.
+ */
+type WakeLockState = 'held' | 'refused' | 'released' | 'unavailable';
 
 export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo): DebugOverlay {
   const debug = runtime.debug;
@@ -225,7 +323,14 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   let lastRedrawAt = 0;
   /** Set when "Start 60 s measurement" is armed; null when free-running. */
   let measureUntil: number | null = null;
-  let frozen = false;
+  /**
+   * The window clock and the duty-cycle readout, latched together.
+   *
+   * `freeze.frozen` is the panel's frozen flag — there is no separate boolean,
+   * so a path that stops the panel cannot stop it without also pinning the
+   * numbers it is about to print.
+   */
+  const freeze = createWindowFreeze(() => debug.frames());
   let peakFps = 0;
   let status = 'free-running — tap “Start 60 s measurement” to take a reading';
 
@@ -234,8 +339,6 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   let armed = false;
   /** The 60 s ran out and the panel froze itself, rather than being copied early. */
   let completed = false;
-  /** `performance.now()` at which the window stopped. Null while it is live. */
-  let frozenAt: number | null = null;
   /** Hidden periods during the current window, and their total duration. */
   let hiddenBreaks = 0;
   let hiddenMs = 0;
@@ -255,7 +358,16 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   let brokeBartenders = 0;
   let brokeQueues = 0;
 
-  let wakeLockState: WakeLockState = 'unavailable';
+  /**
+   * Null until "Start 60 s measurement" asks for a lock, and the row is left
+   * out of the report while it is null.
+   *
+   * Nothing has been requested before then, so there is no outcome to report;
+   * the old initial value of `'unavailable'` said "this browser does not have
+   * the API" on every browser that does, which is the one thing this panel is
+   * built not to do.
+   */
+  let wakeLockState: WakeLockState | null = null;
   let wakeLockSentinel: WakeLockSentinel | null = null;
 
   const drawCalls = installDrawCallCounter(debug.renderer());
@@ -366,6 +478,22 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
         }
         wakeLockSentinel = sentinel;
         wakeLockState = 'held';
+        // The browser releases a screen lock by itself when the document
+        // becomes hidden, and says so only through this event. Without it the
+        // field goes on reading `held` for the rest of the window while the
+        // screen is free to sleep — a mitigation reporting success after it
+        // stopped mitigating, which is worse than reporting nothing.
+        //
+        // The guard is what keeps `held` true for a window that completed
+        // normally: `releaseWakeLock` clears `wakeLockSentinel` *before* it
+        // releases, so a release the overlay asked for no longer matches here
+        // and leaves the field alone. Only a release nobody here requested
+        // reaches the assignment.
+        sentinel.addEventListener('release', () => {
+          if (wakeLockSentinel !== sentinel) return;
+          wakeLockSentinel = null;
+          wakeLockState = 'released';
+        });
       },
       () => {
         wakeLockState = 'refused';
@@ -375,6 +503,8 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
 
   function releaseWakeLock(): void {
     const sentinel = wakeLockSentinel;
+    // Detached first, so the `release` listener above can tell this release
+    // apart from one the browser performed on its own.
     wakeLockSentinel = null;
     if (sentinel !== null) void sentinel.release();
   }
@@ -392,7 +522,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
    * finished measurement for that would be the instrument crying wolf.
    */
   function onVisibilityChange(): void {
-    if (frozen) return;
+    if (freeze.frozen) return;
     const now = performance.now();
 
     if (document.visibilityState === 'hidden') {
@@ -416,13 +546,13 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   /**
    * Wall clock in the current window.
    *
-   * A frozen window stops at `frozenAt` rather than at the moment the report
-   * happens to be rebuilt, so `elapsed_s` does not creep while the panel sits
-   * on the table and a second tap on "Copy report" gives the same number as
-   * the first.
+   * A frozen window stops at the instant it froze rather than at the moment the
+   * report happens to be rebuilt, so `elapsed_s` does not creep while the panel
+   * sits on the table and a second tap on "Copy report" gives the same number
+   * as the first.
    */
   function elapsedMsAt(now: number): number {
-    return (frozenAt ?? now) - windowStart;
+    return freeze.instant(now) - windowStart;
   }
 
   /**
@@ -449,7 +579,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     return validityVerdict({
       armed,
       completed,
-      frozen,
+      frozen: freeze.frozen,
       elapsedMs: elapsedMsAt(now),
       hiddenBreaks,
       hiddenMs: hiddenMsAt(now),
@@ -463,7 +593,13 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   function buildReport(now: number): string {
     const elapsedMs = elapsedMsAt(now);
     const canvas = debug.canvas();
-    const frames = debug.frames();
+    // Live while the panel is live, latched once it is frozen. Everything
+    // downstream of this line — the duty-cycle trio and the four phase
+    // percentiles — therefore describes the window `elapsed_s` describes, which
+    // before DUB-12 it did not: the game goes on rendering after the panel
+    // stops, so a re-read here was a different measurement with the same
+    // heading on it.
+    const frames = freeze.frames();
     const domParticles = confettiPieces();
 
     const n = sampleCount;
@@ -491,10 +627,15 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     // 24 of them.
     const stamp = new Date().toISOString();
 
-    const rows: [string, string][] = [
+    // `null` is "there is nothing true to print here yet", and the row is left
+    // out entirely rather than filled with a plausible word. `n/a` is the other
+    // half of the same rule and is not interchangeable with it: `n/a` means the
+    // browser cannot tell us (`heap_mb` on WebKit), `null` means we have not
+    // asked.
+    const rows: [string, string | null][] = [
       ['build', info.build],
       ['scene', info.stress ? 'stress' : 'normal'],
-      ['state', frozen ? 'FROZEN' : 'live'],
+      ['state', freeze.frozen ? 'FROZEN' : 'live'],
       ['date', stamp.slice(0, 10)],
       ['time', stamp.slice(11, 19) + 'Z'],
       ['fps', fixed(rollingFps(now), 1)],
@@ -538,6 +679,8 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       // is also the condition that drives `valid` to `no`.
       ['hidden_breaks', String(hiddenBreaks)],
       ['hidden_s', fixed(hiddenMsAt(now) / 1000, 1)],
+      // Null until a lock has actually been asked for, which omits the row —
+      // see `wakeLockState`.
       ['wake_lock', wakeLockState],
       ['window_frames', String(n + dropped)],
       ['sim_ms_p95', fixed(frames.phases.sim.p95Ms, 2)],
@@ -547,7 +690,10 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     ];
 
     let text = '';
-    for (const [key, value] of rows) text += `${key.padEnd(19, ' ')} ${value}\n`;
+    for (const [key, value] of rows) {
+      if (value === null) continue;
+      text += `${key.padEnd(19, ' ')} ${value}\n`;
+    }
     if (dropped > 0) {
       text += `${'dropped'.padEnd(19, ' ')} ${dropped}\n`;
     }
@@ -584,7 +730,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
    * frame time that looks slightly off.
    */
   function noteScene(): void {
-    if (sceneBroke || !armed || frozen) return;
+    if (sceneBroke || !armed || freeze.frozen) return;
     if (
       counts.guests === C1_GUESTS &&
       counts.bartenders === C1_BARTENDERS &&
@@ -658,16 +804,18 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     brokeBartenders = 0;
     brokeQueues = 0;
     drawCalls?.reset();
-    // Put the duty-cycle window on the same 60 s as everything else here, so
-    // `busy_pct` and `fps` in one report describe the same stretch of time.
+    // Put the duty-cycle window on the same 60 s as everything else here. This
+    // is one half of `busy_pct` and `fps` describing the same stretch of time;
+    // the other half is `WindowFreeze` latching the readout when the panel
+    // stops, because resetting the window at the start does nothing about a
+    // denominator that keeps growing after the end.
     debug.resetFrames();
   }
 
   // --- buttons ------------------------------------------------------------
   startButton.addEventListener('click', () => {
     const now = performance.now();
-    frozen = false;
-    frozenAt = null;
+    freeze.thaw();
     armed = true;
     completed = false;
     resetWindow(now);
@@ -695,13 +843,13 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     // whole of DUB-10's "copied early still says `valid no`": the verdict for
     // an unfinished window depends on whether it was copied or is still
     // running, so the report has to be rebuilt once the answer is known.
-    frozen = true;
-    // Only the first freeze sets the clock, and the report is rebuilt as of
-    // *that* instant. A second tap on "Copy report" must hand over the same
-    // numbers as the first, not the same numbers with a longer `elapsed_s` and
-    // an `fps` of zero on them.
-    const at = frozenAt ?? now;
-    frozenAt = at;
+    // Only the first freeze sets the clock and latches the duty cycle, and the
+    // report is rebuilt as of *that* instant. A second tap on "Copy report"
+    // must hand over the same numbers as the first, not the same run with a
+    // longer `elapsed_s`, an `fps` of zero and a `busy_pct` diluted by however
+    // long the panel sat there — which is what DUB-12 came to fix.
+    freeze.freeze(now);
+    const at = freeze.instant(now);
     measureUntil = null;
     releaseWakeLock();
     applyFrozenClass();
@@ -742,7 +890,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     // Selectable only while frozen: a `<pre>` whose text is replaced five
     // times a second cannot hold a selection, and while live the panel has to
     // stay transparent to taps so it is not sitting on the game.
-    root.classList.toggle('ce-debug--frozen', frozen);
+    root.classList.toggle('ce-debug--frozen', freeze.frozen);
   }
 
   // --- the sampling loop --------------------------------------------------
@@ -758,7 +906,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     if (!alive) return;
     rafHandle = requestAnimationFrame(tick);
 
-    if (!frozen) {
+    if (!freeze.frozen) {
       const delta = now - lastFrameAt;
       lastFrameAt = now;
 
@@ -808,9 +956,12 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
         // happened to notice — otherwise a hidden period straddling the 60 s
         // mark would print an `elapsed_s` of 68.
         const deadline = measureUntil;
-        frozen = true;
+        // Latches the duty-cycle readout as well as the clock. `wallMs` here is
+        // measured to the game's last rendered frame, so it lands within one
+        // frame of the 60 s `elapsed_s` reports rather than wherever the game
+        // had got to by the time somebody tapped "Copy report".
+        freeze.freeze(deadline);
         completed = true;
-        frozenAt = deadline;
         measureUntil = null;
         releaseWakeLock();
         status =
@@ -829,7 +980,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
 
     if (now - lastRedrawAt < REDRAW_MS) return;
     lastRedrawAt = now;
-    if (frozen) return;
+    if (freeze.frozen) return;
 
     debug.counts(counts);
     noteScene();
