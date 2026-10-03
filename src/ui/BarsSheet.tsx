@@ -1,0 +1,145 @@
+import { MAX_LANES, MAX_STATION_LEVEL } from '../config/economy.ts';
+import { useGameStore, type StationView } from '../state/store.ts';
+import { formatCash, formatGuestRate } from './format.ts';
+import { BuyButton, Sheet } from './Sheet.tsx';
+
+/**
+ * The BARS sheet: one row per station, with the two purchases that station has.
+ *
+ * This is the panel half of the design's central split — **level is bought in a
+ * panel and is exponential, capacity is bought and visible on the floor and is
+ * linear-ish**. So each row shows both axes next to each other, with what the
+ * station is *actually doing* underneath: served vs capacity, and whether it
+ * has a queue or an idle bartender. That line is the reason the player can
+ * diagnose the economy without a tutorial, and it is the same `ClubFlow` the
+ * floor renders, not a second estimate.
+ */
+export function BarsSheet(): React.JSX.Element {
+  const closeSheet = useGameStore((s) => s.closeSheet);
+  const stations = useGameStore((s) => s.stations);
+
+  return (
+    <Sheet
+      title="Bars"
+      subtitle="Level raises what each guest pays. Lanes raise how many you can serve."
+      onClose={closeSheet}
+    >
+      {stations.map((station) => (
+        <StationRow key={station.key} station={station} />
+      ))}
+    </Sheet>
+  );
+}
+
+function StationRow({ station }: { readonly station: StationView }): React.JSX.Element {
+  const cash = useGameStore((s) => s.cash);
+  const actions = useGameStore((s) => s.actions);
+
+  if (!station.unlocked) {
+    const cost = station.unlockCost ?? 0;
+    return (
+      <section className="station-row station-row--locked">
+        <header className="station-row__head">
+          <h3 className="station-row__name">
+            <span aria-hidden="true">🔒</span> {station.name}
+          </h3>
+          <span className="station-row__meta">Locked</span>
+        </header>
+        <p className="station-row__flow">
+          {formatCash(station.pricePerGuest)} a guest once it opens — the highest in the club so far.
+        </p>
+        <BuyButton
+          label="Unlock"
+          price={formatCash(cost)}
+          affordable={cash >= cost}
+          accent="cyan"
+          onBuy={() => actions.unlockStation(station.key)}
+        />
+      </section>
+    );
+  }
+
+  return (
+    <section className="station-row">
+      <header className="station-row__head">
+        <h3 className="station-row__name">{station.name}</h3>
+        <span className="station-row__meta">
+          <Stars count={station.stars} />
+          <span className="station-row__level">
+            {station.maxed ? 'MAXED' : `Lv ${station.level}`}
+          </span>
+        </span>
+      </header>
+
+      {/* Progress toward the next ★, which is where the x2 price jump is. The
+          one piece of forward-looking information in the sheet, and it is a
+          count of levels rather than a time estimate. */}
+      {station.levelsToNextStar !== null && (
+        <div className="star-progress">
+          <div
+            className="star-progress__fill"
+            style={{ width: `${starProgressPercent(station)}%` }}
+          />
+          <span className="star-progress__label">
+            {station.levelsToNextStar} to ★ (×2 price)
+          </span>
+        </div>
+      )}
+
+      <p className="station-row__flow">
+        Serving <strong>{formatGuestRate(station.servedPerSecond)}</strong> of{' '}
+        {formatGuestRate(station.capacityPerSecond)} · {formatCash(station.pricePerGuest)} a guest
+      </p>
+
+      {station.saturated ? (
+        <p className="station-row__diagnosis station-row__diagnosis--warn">
+          <span aria-hidden="true">⚠</span> <strong>Queue</strong> — every lane is busy. Add a lane.
+        </p>
+      ) : station.idleLanes >= 0.5 ? (
+        <p className="station-row__diagnosis">
+          <span aria-hidden="true">◦</span> {station.idleLanes.toFixed(1)} lanes idle — raise the
+          Door, not the lanes.
+        </p>
+      ) : null}
+
+      <div className="station-row__buys">
+        <BuyButton
+          label={`Upgrade to Lv ${Math.min(station.level + 1, MAX_STATION_LEVEL)}`}
+          price={formatCash(station.upgradeCost ?? 0)}
+          affordable={station.upgradeCost !== null && cash >= station.upgradeCost}
+          doneLabel={station.maxed ? '★★★ MAXED' : undefined}
+          onBuy={() => actions.upgradeStation(station.key)}
+        />
+        <BuyButton
+          label={`+ Lane ${Math.min(station.lanes + 1, MAX_LANES)}`}
+          price={formatCash(station.laneCost ?? 0)}
+          affordable={station.laneCost !== null && cash >= station.laneCost}
+          doneLabel={station.laneCost === null ? `${MAX_LANES} LANES` : undefined}
+          accent="cyan"
+          onBuy={() => actions.buyLane(station.key)}
+        />
+      </div>
+    </section>
+  );
+}
+
+/** How far through the current ★ band this station is. */
+function starProgressPercent(station: StationView): number {
+  if (station.levelsToNextStar === null) return 100;
+  // Bands are ten levels wide (★ at 10, 20, 30), so the fill is the position
+  // within the current band of ten.
+  const into = 10 - station.levelsToNextStar;
+  return Math.max(0, Math.min(100, (into / 10) * 100));
+}
+
+function Stars({ count }: { readonly count: number }): React.JSX.Element {
+  return (
+    <span className="stars" aria-label={`${count} of 3 stars`}>
+      {[0, 1, 2].map((i) => (
+        <span key={i} className={i < count ? 'stars__on' : 'stars__off'} aria-hidden="true">
+          ★
+        </span>
+      ))}
+    </span>
+  );
+}

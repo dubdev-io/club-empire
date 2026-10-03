@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { CURRENT_SAVE_VERSION, SAVE_STORAGE_KEY, type SaveV1 } from './schema.ts';
+import {
+  CURRENT_SAVE_VERSION,
+  DEFAULT_SETTINGS,
+  SAVE_STORAGE_KEY,
+  freshSavedClub,
+  type SaveV1,
+  type SaveV2,
+} from './schema.ts';
 import { clearSave, createSave, loadSave, writeSave, type SaveStorage } from './storage.ts';
 
 /** In-memory `localStorage` stand-in, so the codec can be tested in node. */
@@ -31,12 +38,34 @@ function throwingStorage(): SaveStorage {
   };
 }
 
+/** A club part-way through a run, for round-trip tests. */
+function playedClub() {
+  const club = freshSavedClub();
+  club.cash = 12_345.67;
+  club.totalEarned = 98_765.4;
+  club.doorLevel = 4;
+  club.stations = [
+    { key: 'tap', unlocked: true, level: 30, lanes: 3 },
+    { key: 'cocktail', unlocked: true, level: 17, lanes: 2 },
+    { key: 'booth', unlocked: false, level: 1, lanes: 0 },
+  ];
+  club.lastCallMeter = 0.44;
+  club.lastCallFiredCount = 3;
+  club.bubblesCollected = 212;
+  club.elapsedSeconds = 517.5;
+  club.purchaseCount = 61;
+  club.hintBubblePending = false;
+  club.hintStationPending = false;
+  return club;
+}
+
 describe('save round-trip', () => {
-  it('writes and reads back the same economy state', () => {
+  it('writes and reads back the same club', () => {
     const storage = memoryStorage();
     const now = 1_700_000_000_000;
+    const club = playedClub();
 
-    const written = createSave({ money: 1234.56, barLevel: 7 }, 4321, now);
+    const written = createSave(club, DEFAULT_SETTINGS, 4321, now);
     expect(writeSave(storage, written)).toBe(true);
 
     const result = loadSave(storage);
@@ -47,7 +76,19 @@ describe('save round-trip', () => {
     expect(result.save.version).toBe(CURRENT_SAVE_VERSION);
     expect(result.save.lastSeenAt).toBe(now);
     expect(result.save.elapsedTicks).toBe(4321);
-    expect(result.save.economy).toEqual({ money: 1234.56, barLevel: 7 });
+    expect(result.save.club).toEqual(club);
+  });
+
+  it('round-trips settings, so a muted club stays muted', () => {
+    const storage = memoryStorage();
+    const settings = { audio: false, reducedMotion: 'on' as const, haptics: false };
+
+    writeSave(storage, createSave(freshSavedClub(), settings, 0, 1));
+    const result = loadSave(storage);
+
+    expect(result.status).toBe('loaded');
+    if (result.status !== 'loaded') return;
+    expect(result.save.settings).toEqual(settings);
   });
 
   it('reports an absent save as empty rather than failing', () => {
@@ -67,11 +108,40 @@ describe('save migration', () => {
 
     expect(result.migratedFrom).toBe(1);
     expect(result.save.version).toBe(CURRENT_SAVE_VERSION);
-    // Money survives the version bump; new fields get defaults.
-    expect(result.save.economy.money).toBe(999);
-    expect(result.save.economy.barLevel).toBe(1);
+    // Cash survives two version bumps; the club itself starts fresh.
+    expect(result.save.club.cash).toBe(999);
+    expect(result.save.club.doorLevel).toBe(1);
     expect(result.save.lastSeenAt).toBe(1_699_000_000_000);
-    expect(result.save.elapsedTicks).toBe(0);
+  });
+
+  it('migrates v2 by keeping cash and discarding the placeholder bar level', () => {
+    // v2's `barLevel` was the technical shell's placeholder curve. A "level 7"
+    // there is not a level 7 Tap Bar, and carrying it across would hand the
+    // player a club they never built.
+    const v2: SaveV2 = {
+      version: 2,
+      lastSeenAt: 1_699_000_000_000,
+      elapsedTicks: 900,
+      economy: { money: 4_200, barLevel: 7 },
+    };
+    const storage = memoryStorage({ [SAVE_STORAGE_KEY]: JSON.stringify(v2) });
+
+    const result = loadSave(storage);
+    expect(result.status).toBe('loaded');
+    if (result.status !== 'loaded') return;
+
+    expect(result.migratedFrom).toBe(2);
+    expect(result.save.club.cash).toBe(4_200);
+    expect(result.save.club.stations).toHaveLength(3);
+    expect(result.save.club.stations[0]).toEqual({
+      key: 'tap',
+      unlocked: true,
+      level: 1,
+      lanes: 1,
+    });
+    expect(result.save.club.stations[1]!.unlocked).toBe(false);
+    expect(result.save.elapsedTicks).toBe(900);
+    expect(result.save.settings).toEqual(DEFAULT_SETTINGS);
   });
 
   it('a migrated save can be re-saved and re-read at the current version', () => {
@@ -82,13 +152,13 @@ describe('save migration', () => {
     expect(first.status).toBe('loaded');
     if (first.status !== 'loaded') return;
 
-    writeSave(storage, createSave(first.save.economy, 10, 1_699_000_100_000));
+    writeSave(storage, createSave(first.save.club, first.save.settings, 10, 1_699_000_100_000));
 
     const second = loadSave(storage);
     expect(second.status).toBe('loaded');
     if (second.status !== 'loaded') return;
     expect(second.migratedFrom).toBeNull();
-    expect(second.save.economy.money).toBe(50);
+    expect(second.save.club.cash).toBe(50);
   });
 });
 
@@ -101,11 +171,43 @@ describe('save robustness', () => {
   });
 
   it.each([
-    ['missing version', { lastSeenAt: 1, money: 1 }],
-    ['missing lastSeenAt', { version: 2, elapsedTicks: 0, economy: { money: 1, barLevel: 1 } }],
-    ['wrong money type', { version: 2, lastSeenAt: 1, elapsedTicks: 0, economy: { money: 'lots', barLevel: 1 } }],
-    ['NaN money', { version: 2, lastSeenAt: 1, elapsedTicks: 0, economy: { money: Number.NaN, barLevel: 1 } }],
-    ['missing economy', { version: 2, lastSeenAt: 1, elapsedTicks: 0 }],
+    ['missing version', { lastSeenAt: 1, club: freshSavedClub() }],
+    ['missing lastSeenAt', { version: 3, elapsedTicks: 0, club: freshSavedClub() }],
+    ['missing club', { version: 3, lastSeenAt: 1, elapsedTicks: 0 }],
+    [
+      'cash is a string',
+      {
+        version: 3,
+        lastSeenAt: 1,
+        elapsedTicks: 0,
+        club: { ...freshSavedClub(), cash: 'lots' },
+      },
+    ],
+    [
+      'NaN cash',
+      {
+        version: 3,
+        lastSeenAt: 1,
+        elapsedTicks: 0,
+        club: { ...freshSavedClub(), cash: Number.NaN },
+      },
+    ],
+    [
+      'station level is a string',
+      {
+        version: 3,
+        lastSeenAt: 1,
+        elapsedTicks: 0,
+        club: {
+          ...freshSavedClub(),
+          stations: [{ key: 'tap', unlocked: true, level: 'max', lanes: 1 }],
+        },
+      },
+    ],
+    [
+      'no stations at all',
+      { version: 3, lastSeenAt: 1, elapsedTicks: 0, club: { ...freshSavedClub(), stations: [] } },
+    ],
     ['array', [1, 2, 3]],
     ['null', null],
     ['unknown version', { version: 0, lastSeenAt: 1 }],
@@ -115,6 +217,49 @@ describe('save robustness', () => {
     expect(result.status).toBe('discarded');
     if (result.status !== 'discarded') return;
     expect(result.reason).toBe('invalid');
+  });
+
+  it('keeps a club whose settings block is malformed', () => {
+    // Settings are preferences, not progress. Losing a twenty-minute club
+    // because a boolean went missing would be the worst possible trade.
+    const storage = memoryStorage({
+      [SAVE_STORAGE_KEY]: JSON.stringify({
+        version: 3,
+        lastSeenAt: 1,
+        elapsedTicks: 0,
+        club: playedClub(),
+        settings: { audio: 'yes', reducedMotion: 'sometimes' },
+      }),
+    });
+
+    const result = loadSave(storage);
+    expect(result.status).toBe('loaded');
+    if (result.status !== 'loaded') return;
+    expect(result.save.club.cash).toBe(12_345.67);
+    expect(result.save.settings).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it('tolerates a save missing fields added after it was written', () => {
+    // Forward compatibility within a version: an early v3 save that predates
+    // the hint flags must still load, with those flags defaulted.
+    const partial: Record<string, unknown> = { ...playedClub() };
+    delete partial.lastCallMeter;
+    delete partial.hintBubblePending;
+    const storage = memoryStorage({
+      [SAVE_STORAGE_KEY]: JSON.stringify({
+        version: 3,
+        lastSeenAt: 1,
+        elapsedTicks: 0,
+        club: partial,
+      }),
+    });
+
+    const result = loadSave(storage);
+    expect(result.status).toBe('loaded');
+    if (result.status !== 'loaded') return;
+    expect(result.save.club.lastCallMeter).toBe(0);
+    expect(result.save.club.hintBubblePending).toBe(true);
+    expect(result.save.club.cash).toBe(12_345.67);
   });
 
   it('refuses a save from a newer version but leaves it on disk', () => {
@@ -131,7 +276,7 @@ describe('save robustness', () => {
   it('survives storage that throws on every operation', () => {
     const storage = throwingStorage();
     expect(loadSave(storage)).toEqual({ status: 'discarded', reason: 'storage-unreadable' });
-    expect(writeSave(storage, createSave({ money: 1, barLevel: 1 }, 0))).toBe(false);
+    expect(writeSave(storage, createSave(freshSavedClub(), DEFAULT_SETTINGS, 0))).toBe(false);
     expect(() => clearSave(storage)).not.toThrow();
   });
 });

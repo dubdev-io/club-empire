@@ -1,0 +1,98 @@
+/*
+ * Design tokens — §10 of the brief, verbatim.
+ *
+ * This file is the only place a colour, a spacing value, a radius, a type size
+ * or a motion duration is allowed to be written as a literal. Acceptance
+ * criterion 5 is "no inline one-offs", and the way to keep that true is to make
+ * the tokens the easier thing to reach for. If a value you need is missing,
+ * propose it as a token here rather than inlining it at the call site.
+ *
+ * The Pixi layer reads the same hexes from `src/render/palette.ts`, which cites
+ * this file. Two copies of a colour is one copy too many, but a WebGL renderer
+ * cannot read a CSS custom property per frame, so the duplication is confined
+ * to that one module and spelled out there.
+ */
+
+:root {
+  /* --- surfaces ------------------------------------------------------- */
+  --bg-room: #0b0a14;
+  --bg-surface: #171527;
+  --bg-raised: #231f3a;
+
+  /* --- ink ------------------------------------------------------------ */
+  --ink-primary: #f4f1ff;
+  --ink-secondary: #a9a2c9;
+  /* Non-text use only, and always paired with a glyph — it does not clear
+     4.5:1 against --bg-surface and is not allowed to carry meaning alone. */
+  --ink-disabled: #6b6590;
+
+  /* --- accents -------------------------------------------------------- */
+  --neon-magenta: #ff3d9a;
+  --neon-cyan: #2fe4e0;
+  --neon-violet: #8b5cf6;
+  --gold-vip: #ffc94a;
+  --cash-green: #4ade80;
+  --warn-amber: #fbbf24;
+  --danger: #f87171;
+
+  /* --scrim is --bg-room at 72%: behind HUD text over the canvas, and as the
+     modal backdrop. The canvas art is not trusted to stay dark. */
+  --scrim: rgb(11 10 20 / 72%);
+  --scrim-solid: rgb(11 10 20 / 92%);
+
+  /* --- spacing: one scale, no exceptions ------------------------------ */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* --- radius --------------------------------------------------------- */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+
+  /* --- type ----------------------------------------------------------- */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 28px;
+  --text-2xl: 40px;
+  /* Two weights only. */
+  --weight-regular: 400;
+  --weight-semibold: 600;
+
+  /* No webfont in Phase 1 — the system stack, which also means zero font
+     bytes and no layout shift on first paint. */
+  --font-stack: -apple-system, blinkmacsystemfont, 'Segoe UI', roboto, sans-serif;
+
+  /* --- motion --------------------------------------------------------- */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 320ms;
+  --motion-celebrate: 800ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* --- layout --------------------------------------------------------- */
+  /* 16 px each side. Nothing touches a screen edge except the bottom bar. */
+  --gutter: var(--space-4);
+  /* 44x44 minimum touch target, no exceptions. */
+  --touch-min: 44px;
+  /* Primary CTA in any sheet. */
+  --cta-height: 56px;
+  /* Bottom sheets cap at 70% of the viewport. */
+  --sheet-max-height: 70dvh;
+
+  /* --- device safe area ----------------------------------------------- */
+  /* CSS writes the four insets into custom properties so JS can read them
+     back as numbers (see src/render/safeArea.ts). */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}

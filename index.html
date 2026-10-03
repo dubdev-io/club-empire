@@ -11,14 +11,64 @@
     />
     <!-- An explicit SVG icon stops the browser probing /favicon.ico. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="theme-color" content="#0a0612" />
+    <meta name="theme-color" content="#0B0A14" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Club Empire</title>
+    <!--
+      Critical styles only, inlined so the first paint is already the dark room.
+      The stylesheet that carries the design tokens arrives with the bundle, and
+      a page that paints white for 200 ms first is the single most visible
+      artefact on a cold load. These two colours are --bg-room and --bg-raised;
+      they are duplicated here and nowhere else.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0a14;
+      }
+
+      #boot-fallback {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: #0b0a14;
+      }
+    </style>
   </head>
   <body>
     <div id="game-root"></div>
     <div id="ui-root"></div>
+
+    <!--
+      Boot state before the bundle has parsed.
+
+      The boot/loading screen is one of the ten required states, and React
+      cannot paint it until its own chunk has downloaded and executed. On a
+      mid-range phone over 4G that gap is real, and leaving it blank is a white
+      (or black) flash on every cold load. Inlined here so it paints on the
+      first frame the browser gets, with the same colours as the React boot
+      screen that replaces it — so the handover is invisible. Removed by
+      `main.tsx`.
+    -->
+    <div id="boot-fallback">
+      <div
+        style="
+          display: flex;
+          align-items: flex-end;
+          gap: 8px;
+          height: 64px;
+        "
+      >
+        <span style="width: 24px; height: 60%; background: #231f3a; border-radius: 6px 6px 0 0"></span>
+        <span style="width: 24px; height: 100%; background: #231f3a; border-radius: 6px 6px 0 0"></span>
+        <span style="width: 24px; height: 75%; background: #231f3a; border-radius: 6px 6px 0 0"></span>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

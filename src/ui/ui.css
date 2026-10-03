@@ -1,92 +1,1117 @@
-/* Every widget re-enables pointer events for itself; the UI layer as a whole
-   stays transparent to taps so the canvas keeps receiving them. */
+/*
+ * Every widget re-enables pointer events for itself; the UI layer as a whole
+ * stays transparent to taps so the canvas keeps receiving them. That is what
+ * lets the player tap a cash bubble or a bar station "through" the HUD.
+ *
+ * Acceptance criterion 5: every colour, space, radius, type size and duration
+ * in this file comes from `src/styles/tokens.css`. There are no literals here
+ * except structural ones — border widths, 0, 100%, and the two
+ * reserved-width `ch` measurements, each commented where it appears.
+ */
 
-.top-bar {
-  pointer-events: auto;
-  margin: 10px 12px 0;
-  padding: 10px 14px;
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* =========================================================================
+   HUD — top of the screen, read never tapped
+   ========================================================================= */
+
+.hud {
+  pointer-events: none;
+  padding: var(--space-3) var(--gutter) 0;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.hud__row {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  background: var(--panel);
-  border: 1px solid var(--panel-edge);
-  border-radius: 16px;
+}
+
+.hud__cash-block {
+  /* The scrim is not optional: criterion 7 is measured against the *rendered*
+     background, and the canvas behind this is a club with coloured lights in
+     it. --ink-primary on --scrim over --bg-room clears 4.5:1 comfortably. */
+  background: var(--scrim);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
   backdrop-filter: blur(8px);
 }
 
-.top-bar__money {
-  font-size: 22px;
-  font-weight: 700;
-  /* Tabular figures stop the counter jittering as digits change width. */
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.01em;
+.hud__cash {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  line-height: 1.1;
+  /* Reserve the width of the longest string formatMoney can return, so the
+     counter never reflows the row as it crosses a magnitude (§9). */
+  min-width: 6ch;
 }
 
-.top-bar__rate {
-  font-size: 12px;
-  color: var(--ink-dim);
-  font-variant-numeric: tabular-nums;
+.hud__rate {
+  font-size: var(--text-sm);
+  color: var(--cash-green);
+  min-width: 7ch;
 }
 
-.top-bar__level {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ink-dim);
+.hud__boost {
+  color: var(--neon-violet);
+  font-weight: var(--weight-semibold);
+}
+
+/* --- Last Call meter ----------------------------------------------------- */
+
+.meter {
+  background: var(--scrim);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  /* At rest the meter is quiet. It is promoted when nothing is affordable,
+     which is the moment it becomes the only thing the player can act on. */
+  opacity: 0.72;
+  transition: opacity var(--motion-base) var(--ease);
+}
+
+.meter--promoted,
+.meter--firing {
+  opacity: 1;
+}
+
+.meter__track {
+  flex: 1 1 auto;
+  height: var(--space-2);
+  background: var(--bg-raised);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.meter__fill {
+  height: 100%;
+  background: var(--neon-violet);
+  border-radius: var(--radius-pill);
+  transition: width var(--motion-fast) linear;
+}
+
+.meter--promoted .meter__fill {
+  animation: meter-pulse 1.2s var(--ease) infinite;
+}
+
+.meter--firing .meter__fill {
+  background: var(--gold-vip);
+}
+
+/* Reduced motion: the fill still moves and the number still changes, the
+   pulse just stops. Criterion 6 — never remove the feedback. */
+.meter--still .meter__fill {
+  animation: none;
+}
+
+@keyframes meter-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.meter__label {
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+  /* Reserved so "12%" -> "100%" -> "×3 · 30s" never shifts the track. */
+  min-width: 11ch;
   text-align: right;
 }
 
-.status-line {
-  pointer-events: none;
-  margin: 8px 12px 0;
-  font-size: 11px;
-  color: var(--ink-dim);
-  font-variant-numeric: tabular-nums;
+.meter__tag {
+  color: var(--neon-violet);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
 }
 
-.spacer {
+.meter--firing .meter__tag {
+  color: var(--gold-vip);
+}
+
+/* --- queue warning ------------------------------------------------------- */
+
+.queue-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--scrim);
+  border-left: 3px solid var(--warn-amber);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--ink-primary);
+}
+
+.queue-warning strong {
+  color: var(--warn-amber);
+  font-weight: var(--weight-semibold);
+}
+
+/* =========================================================================
+   Banners
+   ========================================================================= */
+
+.banners {
+  pointer-events: auto;
+  padding: var(--space-2) var(--gutter) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--ink-primary);
+}
+
+.banner--warn {
+  border-left: 3px solid var(--warn-amber);
+}
+
+.banner__text {
   flex: 1 1 auto;
 }
 
-.action-bar {
-  pointer-events: auto;
-  margin: 0 12px 14px;
+.banner__action {
+  /* 44x44 minimum, no exceptions — even for a dismiss. */
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  padding: 0 var(--space-3);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  background: var(--bg-raised);
+  border: 0;
+  border-radius: var(--radius-sm);
 }
 
-.action-button {
+/* =========================================================================
+   Bottom bar — the thumb zone
+   ========================================================================= */
+
+.club-spacer {
+  flex: 1 1 auto;
+}
+
+.bottom-bar {
   pointer-events: auto;
-  width: 100%;
-  /* 56px clears the 44px minimum touch target with room for a thumb. */
-  min-height: 56px;
-  padding: 12px 18px;
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--gutter) var(--space-3);
+  /* The one element allowed to touch a screen edge, because its background
+     has to run under the home indicator. */
+  background: linear-gradient(to top, var(--bg-room), transparent);
+}
+
+.bar-button {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: var(--cta-height);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
+  color: var(--ink-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-raised);
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.bar-button--icon {
+  /* Settings is rarer than the two panels, so it takes the smallest share of
+     the bar while still clearing the 44 px minimum. */
+  flex: 0 0 var(--cta-height);
+  font-size: var(--text-lg);
+}
+
+/* No transition on the pressed state. A tween between the tap and the visual
+   response is exactly the latency players read as "unresponsive". */
+.bar-button:active {
+  background: var(--bg-raised);
+}
+
+.bar-button--active {
+  border-color: var(--neon-magenta);
+}
+
+.bar-button__dot {
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--cash-green);
+}
+
+.bar-button__warn {
+  color: var(--warn-amber);
+  font-size: var(--text-base);
+}
+
+/* =========================================================================
+   Overlays — scrim plus one surface
+   ========================================================================= */
+
+.overlay {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.overlay__scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+}
+
+/* --- bottom sheet -------------------------------------------------------- */
+
+.sheet {
+  position: relative;
+  max-height: var(--sheet-max-height);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding-bottom: calc(var(--space-4) + var(--safe-bottom));
+  animation: sheet-in var(--motion-base) var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet {
+    animation: none;
+  }
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(var(--space-7));
+    opacity: 0;
+  }
+}
+
+.sheet__handle {
+  width: var(--space-6);
+  height: var(--space-1);
+  margin: var(--space-3) auto var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--ink-disabled);
+}
+
+.sheet__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0 var(--gutter) var(--space-3);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.sheet__subtitle {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  color: var(--ink-secondary);
+}
+
+.icon-button {
+  flex: 0 0 var(--touch-min);
+  width: var(--touch-min);
+  height: var(--touch-min);
+  font: inherit;
+  font-size: var(--text-base);
+  color: var(--ink-secondary);
+  background: var(--bg-raised);
+  border: 0;
+  border-radius: var(--radius-pill);
+}
+
+.sheet__body {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  /* The sheet scrolls; the page behind it must not. */
+  overscroll-behavior: contain;
+  padding: 0 var(--gutter);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* --- station rows -------------------------------------------------------- */
+
+.station-row {
+  background: var(--bg-raised);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.station-row--locked {
+  /* Opacity alone never carries state here — the row also has a lock glyph
+     and the word "Locked". */
+  opacity: 0.88;
+}
+
+.station-row__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-2);
+}
+
+.station-row__name {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.station-row__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.station-row__level {
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.station-row__flow {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.station-row__flow strong {
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.station-row__diagnosis {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.station-row__diagnosis--warn {
+  color: var(--ink-primary);
+}
+
+.station-row__diagnosis--warn strong {
+  color: var(--warn-amber);
+}
+
+.station-row__buys {
+  display: flex;
+  flex-direction: column;
+  /* >= 8 px between any two tappable things (§9). */
+  gap: var(--space-2);
+}
+
+.stars {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.stars__on {
+  color: var(--gold-vip);
+}
+
+.stars__off {
+  color: var(--ink-disabled);
+}
+
+.star-progress {
+  position: relative;
+  height: var(--space-5);
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.star-progress__fill {
+  height: 100%;
+  background: var(--gold-vip);
+  opacity: 0.22;
+  transition: width var(--motion-base) var(--ease);
+}
+
+.star-progress__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+
+/* --- door comparison ----------------------------------------------------- */
+
+.door-compare {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.door-compare__side {
+  flex: 1 1 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--bg-raised);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* The binding side of the min() — the one the player should be spending on.
+   Marked with a border and a brighter value, not colour alone. */
+.door-compare__side--binding {
+  border-color: var(--neon-cyan);
+}
+
+.door-compare__label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-secondary);
+}
+
+.door-compare__value {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.door-compare__sub {
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+
+.door-compare__vs {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* --- settings ------------------------------------------------------------ */
+
+.toggle {
+  width: 100%;
+  min-height: var(--cta-height);
+  padding: var(--space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  text-align: left;
   font: inherit;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--ink);
-  background: linear-gradient(180deg, #52266f 0%, #35164c 100%);
-  border: 1px solid var(--panel-edge);
-  border-radius: 18px;
-  /* No transition on :active — a tween between tap and visual response is
-     exactly the latency players read as "unresponsive". */
-  cursor: pointer;
+  color: var(--ink-primary);
+  background: var(--bg-raised);
+  border: 0;
+  border-radius: var(--radius-md);
 }
 
-.action-button:active {
-  background: linear-gradient(180deg, #6a3490 0%, #45206180 100%);
-  transform: translateY(1px);
+.toggle__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
 }
 
-.action-button:disabled {
-  opacity: 0.45;
-  cursor: default;
+.toggle__label {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
 }
 
-.action-button__cost {
-  font-variant-numeric: tabular-nums;
-  color: var(--accent);
+.toggle__hint {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.toggle__control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The state as a word, not just a knob position (§9: never colour alone). */
+.toggle__state {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  min-width: 3ch;
+  text-align: right;
+}
+
+.toggle__track {
+  width: var(--space-7);
+  height: var(--space-5);
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  display: flex;
+  justify-content: flex-start;
+  transition: background var(--motion-fast) var(--ease);
+}
+
+.toggle__track--on {
+  background: var(--cash-green);
+  justify-content: flex-end;
+}
+
+.toggle__knob {
+  width: var(--space-4);
+  height: var(--space-4);
+  margin: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--ink-primary);
+}
+
+.settings-reset {
+  border-top: 1px solid var(--bg-raised);
+  padding-top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.settings-reset__title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.settings-reset__hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.settings-reset__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* =========================================================================
+   Buttons
+   ========================================================================= */
+
+.cta {
+  width: 100%;
+  min-height: var(--cta-height);
+  padding: var(--space-2) var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-raised);
+  border-radius: var(--radius-md);
+}
+
+.cta--solo {
+  justify-content: center;
+  letter-spacing: 0.08em;
+}
+
+.cta:active {
+  background: var(--bg-raised);
+}
+
+.cta--affordable {
+  border-color: var(--cash-green);
+}
+
+.cta--magenta.cta--affordable {
+  background: var(--neon-magenta);
+  border-color: var(--neon-magenta);
+  color: var(--bg-room);
+}
+
+.cta--cyan.cta--affordable {
+  background: var(--neon-cyan);
+  border-color: var(--neon-cyan);
+  color: var(--bg-room);
+}
+
+.cta--magenta.cta--solo {
+  background: var(--neon-magenta);
+  border-color: var(--neon-magenta);
+  color: var(--bg-room);
+}
+
+.cta--danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--bg-room);
+  justify-content: center;
+}
+
+.cta--quiet {
+  justify-content: center;
+  color: var(--ink-primary);
+}
+
+.cta[aria-disabled='true'] {
+  opacity: 0.55;
+}
+
+.cta__label {
+  text-align: left;
+}
+
+.cta__price {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  /* --ink-disabled is non-text elsewhere; here it is paired with the lock
+     glyph so the state is never carried by the colour alone. */
+  color: var(--ink-disabled);
+}
+
+.cta__price--affordable {
+  color: var(--cash-green);
+}
+
+.cta--affordable .cta__price--affordable {
+  color: var(--bg-room);
+}
+
+.cta__lock {
+  font-size: var(--text-xs);
+}
+
+.cta__done {
+  font-size: var(--text-sm);
+  letter-spacing: 0.08em;
+  color: var(--gold-vip);
+}
+
+/* =========================================================================
+   Cards — offline return, club complete
+   ========================================================================= */
+
+.overlay > .card {
+  margin: auto var(--gutter);
+}
+
+.card {
+  position: relative;
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  text-align: center;
+  animation: card-in var(--motion-slow) var(--ease);
+}
+
+.card--tall {
+  max-height: 86dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+  }
+}
+
+@keyframes card-in {
+  from {
+    transform: scale(0.94);
+    opacity: 0;
+  }
+}
+
+.card__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-primary);
+}
+
+.card__rule {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--bg-raised);
+}
+
+.card__line {
+  margin: 0;
+  font-size: var(--text-base);
+  color: var(--ink-primary);
+}
+
+.card__line--dim {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+
+.card__amount {
+  margin: var(--space-2) 0;
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  color: var(--gold-vip);
+}
+
+.card__note {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.card__note--next strong {
+  color: var(--ink-primary);
+}
+
+.stats {
+  width: 100%;
+  margin: var(--space-2) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.stats__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.stats__label {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.stats__value {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+/* =========================================================================
+   ★ celebration
+   ========================================================================= */
+
+.star-burst {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--scrim);
+  animation: star-flash var(--motion-celebrate) var(--ease) forwards;
+}
+
+.star-burst__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  animation: star-shake var(--motion-celebrate) var(--ease);
+}
+
+/* Reduced motion keeps the flash and the numbers, drops the shake and the
+   confetti. Criterion 6: the feedback is replaced, never removed. */
+.star-burst--still,
+.star-burst--still .star-burst__panel {
+  animation: none;
+}
+
+.star-burst--still {
+  background: var(--scrim-solid);
+}
+
+@keyframes star-flash {
+  0% {
+    background: var(--gold-vip);
+  }
+
+  18% {
+    background: var(--scrim);
+  }
+
+  100% {
+    background: var(--scrim);
+  }
+}
+
+@keyframes star-shake {
+  0%,
+  100% {
+    transform: translateX(0) scale(1);
+  }
+
+  12% {
+    transform: translateX(calc(var(--space-2) * -1)) scale(1.06);
+  }
+
+  28% {
+    transform: translateX(var(--space-2)) scale(1.04);
+  }
+
+  44% {
+    transform: translateX(calc(var(--space-1) * -1)) scale(1.02);
+  }
+}
+
+.star-burst__stars {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--text-2xl);
+}
+
+.star-burst__on {
+  color: var(--gold-vip);
+}
+
+.star-burst__off {
+  color: var(--ink-disabled);
+}
+
+.star-burst__headline {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.star-burst__sub {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.confetti {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.confetti__piece {
+  position: absolute;
+  top: calc(var(--space-5) * -1);
+  width: var(--space-2);
+  height: var(--space-3);
+  border-radius: 2px;
+  animation: confetti-fall var(--motion-celebrate) var(--ease) forwards;
+}
+
+@keyframes confetti-fall {
+  from {
+    transform: translateY(0) rotate(0deg);
+    opacity: 1;
+  }
+
+  to {
+    transform: translateY(70dvh) rotate(320deg);
+    opacity: 0;
+  }
+}
+
+/* =========================================================================
+   Boot and fatal states
+   ========================================================================= */
+
+.boot {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  background: var(--bg-room);
+}
+
+/* A club silhouette: three bars of back-bar shelving. One element each, no
+   asset, and recognisable at a glance. */
+.boot__silhouette {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  height: var(--space-8);
+}
+
+.boot__bar {
+  width: var(--space-5);
+  background: var(--bg-raised);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.boot__bar:nth-child(1) {
+  height: 60%;
+}
+
+.boot__bar:nth-child(2) {
+  height: 100%;
+}
+
+.boot__bar:nth-child(3) {
+  height: 75%;
+}
+
+.boot__title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.24em;
+  color: var(--ink-secondary);
+}
+
+.boot__spinner {
+  width: var(--space-5);
+  height: var(--space-5);
+  border: 2px solid var(--bg-raised);
+  border-top-color: var(--neon-magenta);
+  border-radius: var(--radius-pill);
+  animation: spin 900ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot__spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.boot__progress {
+  width: 50%;
+  height: var(--space-1);
+  background: var(--bg-raised);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.boot__progress-fill {
+  height: 100%;
+  background: var(--neon-magenta);
+  transition: width var(--motion-fast) linear;
+}
+
+.fatal {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-5);
+  text-align: center;
+  background: var(--bg-room);
+}
+
+.fatal__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.fatal__body {
+  margin: 0;
+  max-width: 34ch;
+  font-size: var(--text-base);
+  color: var(--ink-secondary);
+}
+
+.fatal__body--dim {
+  font-size: var(--text-sm);
+  color: var(--ink-disabled);
+}
+
+/* A phone outline that leans, which is the whole instruction. */
+.fatal__rotate-glyph {
+  width: var(--space-6);
+  height: var(--space-7);
+  border: 2px solid var(--ink-secondary);
+  border-radius: var(--radius-sm);
+  transform: rotate(90deg);
+  animation: rotate-hint 2s var(--ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fatal__rotate-glyph {
+    animation: none;
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes rotate-hint {
+  0%,
+  45% {
+    transform: rotate(90deg);
+  }
+
+  70%,
+  100% {
+    transform: rotate(0deg);
+  }
 }

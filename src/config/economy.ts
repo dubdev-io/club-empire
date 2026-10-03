@@ -167,6 +167,38 @@ export const AVERAGE_SPEND_MULTIPLIER = GUEST_TYPES.reduce((sum, g) => sum + g.s
 /** Uncollected bubbles block the next spawn, so this is a hard ceiling. */
 export const MAX_BUBBLES_ON_SCREEN = 3;
 
+/**
+ * Seconds between bubble spawns, when a slot is free.
+ *
+ * Pinned by §4.5 rather than chosen: "~25 bubbles in ~20 s triggers it" means
+ * the player must be able to collect ~1.25 bubbles a second, so the spawner has
+ * to offer them at least that fast. With three slots and a 0.8 s interval a
+ * player tapping as fast as they see them gets 1.25/s and fires Last Call in
+ * 20 s, exactly as specified.
+ */
+export const BUBBLE_SPAWN_INTERVAL_SECONDS = 0.8;
+
+/**
+ * A bubble is a tip, priced in seconds of current income.
+ *
+ * Deliberately small. The §4.4 pacing table was authored and signed off against
+ * *passive* income, so bubbles have to stay a garnish on that curve rather than
+ * a second income stream — at the full 1.25 bubbles/s this is +50% income, and
+ * the acceleration the design wants from tapping is meant to come from Last
+ * Call (x3), not from the tips themselves. The dev auto-buyer does not tap, so
+ * acceptance criterion 1 measures the passive curve.
+ */
+export const BUBBLE_VALUE_SECONDS_OF_INCOME = 0.4;
+
+/**
+ * Floor on a bubble's value, in cash.
+ *
+ * At t = 0 income is 1.26/s, so a pure proportional tip would be worth 0.5 —
+ * a counter that visibly does nothing when tapped. The first tap in the game is
+ * the one that teaches the whole loop; it has to pay.
+ */
+export const BUBBLE_MIN_VALUE = 1;
+
 /** Meter gained per bubble tapped, as a fraction of full. */
 export const LAST_CALL_GAIN_PER_BUBBLE = 0.04;
 
@@ -317,8 +349,59 @@ export interface IncomeOptions {
   readonly arrivalsPerSecond?: number;
 }
 
-export function incomePerSecond(progress: ClubProgress, options: IncomeOptions = {}): number {
+/** What one station is doing right now. The floor renders this, it does not invent it. */
+export interface StationFlow {
+  readonly key: StationKey;
+  /** Guests per second actually being served here. */
+  readonly servedPerSecond: number;
+  /** Guests per second this station *could* serve: `lanes / serveTime`. */
+  readonly capacityPerSecond: number;
+  /** What one average guest pays here, across the guest mix. */
+  readonly pricePerGuest: number;
+  readonly incomePerSecond: number;
+  /**
+   * Every lane is busy and guests are still arriving for this station.
+   * This is what puts a queue beside the bar.
+   */
+  readonly saturated: boolean;
+  /** Lanes with nothing to do, fractional. This is what makes a bartender visibly idle. */
+  readonly idleLanes: number;
+}
+
+/** The whole club's throughput, resolved. */
+export interface ClubFlow {
+  readonly arrivalsPerSecond: number;
+  readonly servedPerSecond: number;
+  /**
+   * Guests per second arriving that no station can take.
+   *
+   * This is the door queue, and it is the entire tutorial: it is non-zero
+   * exactly when the player's next useful purchase is capacity rather than
+   * another level.
+   */
+  readonly turnedAwayPerSecond: number;
+  readonly incomePerSecond: number;
+  readonly bottleneck: Bottleneck;
+  readonly stations: readonly StationFlow[];
+}
+
+/**
+ * The throughput rule, resolved into every number the game needs — the one
+ * implementation of the `min()`.
+ *
+ * `incomePerSecond` is a projection of this, so the signed-off economy model
+ * and the queues drawn on the floor cannot disagree about what the club is
+ * doing. Routing sends each guest to the highest-drink-price station with a
+ * free lane; the remainder overflows down the price order and whatever is left
+ * at the end is turned away at the door.
+ *
+ * Allocates. That is fine and deliberate: nothing this depends on changes on a
+ * tick, so `ClubState` calls it on purchase only and caches the result. It must
+ * never be called from the per-frame or per-tick path.
+ */
+export function computeFlow(progress: ClubProgress, options: IncomeOptions = {}): ClubFlow {
   const spendMultiplier = options.spendMultiplier ?? AVERAGE_SPEND_MULTIPLIER;
+  const arrivalsPerSecond = options.arrivalsPerSecond ?? doorArrivalsPerSecond(progress.doorLevel);
 
   const open = progress.stations
     .filter((st) => st.unlocked && st.lanes > 0)
@@ -328,14 +411,48 @@ export function incomePerSecond(progress: ClubProgress, options: IncomeOptions =
     })
     .sort((a, b) => b.price - a.price);
 
-  let remaining = options.arrivalsPerSecond ?? doorArrivalsPerSecond(progress.doorLevel);
+  const stations: StationFlow[] = [];
+  let remaining = arrivalsPerSecond;
   let income = 0;
+  let served = 0;
+
   for (const st of open) {
-    const served = Math.min(remaining, st.capacity);
-    income += served * st.price * spendMultiplier;
-    remaining -= served;
+    const demand = remaining;
+    const take = Math.min(demand, st.capacity);
+    const stationIncome = take * st.price * spendMultiplier;
+
+    income += stationIncome;
+    served += take;
+    remaining -= take;
+
+    stations.push({
+      key: st.def.key,
+      servedPerSecond: take,
+      capacityPerSecond: st.capacity,
+      pricePerGuest: st.price * spendMultiplier,
+      incomePerSecond: stationIncome,
+      // Saturated means the lanes ran out before the demand did. `demand`
+      // includes everything that overflowed from dearer stations, so this is
+      // true exactly when guests are still waiting for *this* bar.
+      saturated: demand > st.capacity,
+      // capacity = lanes / serveTime, so the fraction of unused capacity
+      // scaled by the lane count is the number of lanes standing still.
+      idleLanes: (1 - take / st.capacity) * st.def.serveTime * st.capacity,
+    });
   }
-  return income;
+
+  return {
+    arrivalsPerSecond,
+    servedPerSecond: served,
+    turnedAwayPerSecond: remaining,
+    incomePerSecond: income,
+    bottleneck: arrivalsPerSecond < totalCapacity(progress) ? 'door' : 'capacity',
+    stations,
+  };
+}
+
+export function incomePerSecond(progress: ClubProgress, options: IncomeOptions = {}): number {
+  return computeFlow(progress, options).incomePerSecond;
 }
 
 /** Full build-out: every station L30 with 3 lanes, and Door L8. */

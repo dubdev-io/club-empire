@@ -98,8 +98,26 @@ export function clearSave(storage: SaveStorage | null): void {
   }
 }
 
+/**
+ * The live club, as `createSave` needs to read it.
+ *
+ * Structurally identical to `SaveV3['club']` but with a readonly station list,
+ * so `ClubState`'s immutable snapshot can be passed straight in. Spelling it
+ * out rather than widening `SaveV3` keeps the persisted type exactly as strict
+ * as it is on disk.
+ */
+export interface SavableClub extends Omit<CurrentSave['club'], 'stations'> {
+  readonly stations: readonly {
+    readonly key: string;
+    readonly unlocked: boolean;
+    readonly level: number;
+    readonly lanes: number;
+  }[];
+}
+
 export function createSave(
-  economy: CurrentSave['economy'],
+  club: SavableClub,
+  settings: CurrentSave['settings'],
   elapsedTicks: number,
   now: number = Date.now(),
 ): CurrentSave {
@@ -107,6 +125,27 @@ export function createSave(
     version: CURRENT_SAVE_VERSION,
     lastSeenAt: now,
     elapsedTicks,
-    economy: { money: economy.money, barLevel: economy.barLevel },
+    // Copied field by field rather than spread, so adding a field to the live
+    // `ClubState` cannot silently start persisting it without a version bump.
+    club: {
+      cash: club.cash,
+      totalEarned: club.totalEarned,
+      doorLevel: club.doorLevel,
+      stations: club.stations.map((st) => ({
+        key: st.key,
+        unlocked: st.unlocked,
+        level: st.level,
+        lanes: st.lanes,
+      })),
+      lastCallMeter: club.lastCallMeter,
+      lastCallFiredCount: club.lastCallFiredCount,
+      bubblesCollected: club.bubblesCollected,
+      elapsedSeconds: club.elapsedSeconds,
+      purchaseCount: club.purchaseCount,
+      completeSeen: club.completeSeen,
+      hintBubblePending: club.hintBubblePending,
+      hintStationPending: club.hintStationPending,
+    },
+    settings: { ...settings },
   };
 }

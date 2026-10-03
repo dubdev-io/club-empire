@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { FixedStepLoop } from './fixedStepLoop.ts';
-import { TICKS_PER_SECOND } from './constants.ts';
-import { createEconomyState, stepEconomy } from './economy.ts';
+import { TICK_SECONDS, TICKS_PER_SECOND } from './constants.ts';
+
+/**
+ * A stand-in economy: 2 cash per simulated second, accumulated one tick at a
+ * time.
+ *
+ * Deliberately not the real `tickClub`. What is under test here is the
+ * accumulator, and the cleanest way to see a tick-counting bug is for the
+ * thing being accumulated to be arithmetic simple enough that the expected
+ * answer can be written down by hand.
+ */
+function createEconomyState(): { money: number } {
+  return { money: 0 };
+}
+
+function stepEconomy(economy: { money: number }): void {
+  economy.money += 2 * TICK_SECONDS;
+}
 
 /**
  * Drive the loop for `seconds` of simulated wall-clock time at a given frame

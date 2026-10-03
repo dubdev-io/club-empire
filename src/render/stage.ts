@@ -1,5 +1,6 @@
 import { Application, Container } from 'pixi.js';
 import { DESIGN_HEIGHT, DESIGN_WIDTH } from '../sim/constants.ts';
+import { BG_ROOM } from './palette.ts';
 import { readSafeAreaInsets } from './safeArea.ts';
 
 export interface Stage {
@@ -11,6 +12,16 @@ export interface Stage {
   readonly world: Container;
   /** Design-space width/height actually visible after letterboxing. */
   readonly layout: StageLayout;
+  /**
+   * Convert a pointer event's viewport coordinates into design space.
+   *
+   * Hit-testing has to happen in the same 390x844 coordinates the layout table
+   * is written in, or every touch target is off by the letterbox offset. Writes
+   * into the caller's object rather than returning a new one, because this runs
+   * on every pointer event and tap latency is the one budget in the game with a
+   * hard number attached to it.
+   */
+  toDesign(clientX: number, clientY: number, out: { x: number; y: number }): void;
   destroy(): void;
 }
 
@@ -38,7 +49,7 @@ export async function createStage(parent: HTMLElement): Promise<Stage> {
   const app = new Application();
 
   await app.init({
-    background: 0x0a0612,
+    background: BG_ROOM,
     antialias: false,
     // Cap at 2x. A 3x device pixel ratio triples fill-rate cost for a
     // difference no one can see on a phone, and fill rate is exactly what a
@@ -64,6 +75,16 @@ export async function createStage(parent: HTMLElement): Promise<Stage> {
     height: DESIGN_HEIGHT,
     insetTop: 0,
     insetBottom: 0,
+  };
+
+  // The canvas rect is cached rather than read per event: `getBoundingClientRect`
+  // forces a layout flush, and doing that inside a `pointerdown` handler is
+  // paying for a reflow on the one code path that has a 100 ms budget. It is
+  // refreshed on resize and orientation change, which are the only things that
+  // can move the canvas — the page itself does not scroll.
+  let canvasRect = app.canvas.getBoundingClientRect();
+  const refreshRect = (): void => {
+    canvasRect = app.canvas.getBoundingClientRect();
   };
 
   const applyLayout = (): void => {
@@ -96,7 +117,11 @@ export async function createStage(parent: HTMLElement): Promise<Stage> {
   // iOS, so re-run on the next frame as well.
   const onResize = (): void => {
     applyLayout();
-    requestAnimationFrame(applyLayout);
+    refreshRect();
+    requestAnimationFrame(() => {
+      applyLayout();
+      refreshRect();
+    });
   };
   app.renderer.on('resize', onResize);
   window.addEventListener('orientationchange', onResize);
@@ -116,6 +141,10 @@ export async function createStage(parent: HTMLElement): Promise<Stage> {
     app,
     world,
     layout,
+    toDesign: (clientX, clientY, out) => {
+      out.x = (clientX - canvasRect.left - world.position.x) / layout.scale;
+      out.y = (clientY - canvasRect.top - world.position.y) / layout.scale;
+    },
     destroy: () => {
       app.renderer.off('resize', onResize);
       window.removeEventListener('orientationchange', onResize);
