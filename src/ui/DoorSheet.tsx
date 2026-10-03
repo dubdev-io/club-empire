@@ -26,8 +26,17 @@ export function DoorSheet(): React.JSX.Element {
   const arrivals = useGameStore((s) => s.arrivalsPerSecond);
   const capacity = useGameStore((s) => s.capacityPerSecond);
   const turnedAway = useGameStore((s) => s.turnedAwayPerSecond);
+  const stations = useGameStore((s) => s.stations);
 
   const doorBinding = arrivals < capacity;
+
+  // Is "more lanes" something the player can still do? At full build-out every
+  // `laneCost` is null and 0.058/s is turned away for ever — by design, since
+  // Door Lv 8 is deliberately a hair ahead of three stations at three lanes. A
+  // warning naming a fix that no longer exists is a dead end, and §9's "no
+  // advice the player cannot act on" applies to the last minute of the game as
+  // much as the first.
+  const lanesBuyable = stations.some((s) => !s.unlocked || s.laneCost !== null);
 
   return (
     <Sheet
@@ -53,10 +62,18 @@ export function DoorSheet(): React.JSX.Element {
         </div>
       </div>
 
-      {turnedAway > 0.001 ? (
+      {turnedAway > 0.001 && lanesBuyable ? (
         <p className="station-row__diagnosis station-row__diagnosis--warn">
           <span aria-hidden="true">⚠</span> <strong>Queue</strong> —{' '}
           {formatGuestRate(turnedAway)} turned away. More lanes before more guests.
+        </p>
+      ) : turnedAway > 0.001 ? (
+        // Every lane bought. The residual is a fact about a finished club, not
+        // a problem, so it is stated and not alarmed: no ⚠, no instruction, and
+        // nothing the player is being nagged to go and fix.
+        <p className="station-row__diagnosis">
+          <span aria-hidden="true">◦</span> {formatGuestRate(turnedAway)} turned away — every lane
+          is bought and the door runs a hair ahead of the bars.
         </p>
       ) : (
         <p className="station-row__diagnosis">
@@ -64,11 +81,16 @@ export function DoorSheet(): React.JSX.Element {
         </p>
       )}
 
+      {/* Same terminal-state rule as the Bars sheet: at Lv 8 "Upgrade to Door
+          Lv 8" is literally wrong, so the label states where the door is
+          instead of offering a step it cannot take. */}
       <BuyButton
-        label={`Upgrade to Door Lv ${Math.min(doorLevel + 1, DOOR_MAX)}`}
+        label={
+          doorMaxed ? `Door Lv ${DOOR_MAX} — maxed` : `Upgrade to Door Lv ${doorLevel + 1}`
+        }
         price={formatCash(doorCost ?? 0)}
         affordable={doorCost !== null && cash >= doorCost}
-        doneLabel={doorMaxed ? `Lv ${DOOR_MAX} MAXED` : undefined}
+        doneLabel={doorMaxed ? `Lv ${DOOR_MAX} of ${DOOR_MAX}` : undefined}
         accent="cyan"
         onBuy={actions.upgradeDoor}
       />

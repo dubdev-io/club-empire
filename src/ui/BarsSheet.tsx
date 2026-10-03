@@ -63,26 +63,35 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
     <section className="station-row">
       <header className="station-row__head">
         <h3 className="station-row__name">{station.name}</h3>
+        {/* The header states the level and the stars state how far through the
+            station is. It used to say MAXED here *and* on the upgrade row;
+            design review asked for one of them, so the terminal state is said
+            where the action used to be. */}
         <span className="station-row__meta">
           <Stars count={station.stars} />
-          <span className="station-row__level">
-            {station.maxed ? 'MAXED' : `Lv ${station.level}`}
-          </span>
+          <span className="station-row__level">Lv {station.level}</span>
         </span>
       </header>
 
       {/* Progress toward the next ★, which is where the x2 price jump is. The
           one piece of forward-looking information in the sheet, and it is a
-          count of levels rather than a time estimate. */}
+          count of levels rather than a time estimate.
+
+          The label sits *above* the track, not inside it. Design review caught
+          the fill terminating mid-string — "(x2 | price)" — which the eye parses
+          as a rendering bug before it parses it as a meter. Nothing crosses a
+          glyph now, so the fill can also be read at full strength. */}
       {station.levelsToNextStar !== null && (
         <div className="star-progress">
-          <div
-            className="star-progress__fill"
-            style={{ width: `${starProgressPercent(station)}%` }}
-          />
           <span className="star-progress__label">
             {station.levelsToNextStar} to ★ (×2 price)
           </span>
+          <div className="star-progress__track">
+            <div
+              className="star-progress__fill"
+              style={{ width: `${starProgressPercent(station)}%` }}
+            />
+          </div>
         </div>
       )}
 
@@ -103,11 +112,19 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
       ) : null}
 
       <div className="station-row__buys">
+        {/* A maxed station must not read as an action. "Upgrade to Lv 30" on a
+            station already at 30 is literally wrong, so the label becomes the
+            terminal state and the price slot carries the badge — the same shape
+            the lane button already uses when it reaches 3 lanes. */}
         <BuyButton
-          label={`Upgrade to Lv ${Math.min(station.level + 1, MAX_STATION_LEVEL)}`}
+          label={
+            station.maxed
+              ? `Lv ${MAX_STATION_LEVEL} — maxed`
+              : `Upgrade to Lv ${station.level + 1}`
+          }
           price={formatCash(station.upgradeCost ?? 0)}
           affordable={station.upgradeCost !== null && cash >= station.upgradeCost}
-          doneLabel={station.maxed ? '★★★ MAXED' : undefined}
+          doneLabel={station.maxed ? '★★★' : undefined}
           onBuy={() => actions.upgradeStation(station.key)}
         />
         <BuyButton
