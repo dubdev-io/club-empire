@@ -1,7 +1,93 @@
 import { DOOR_MAX } from '../config/economy.ts';
-import { useGameStore } from '../state/store.ts';
+import { useGameStore, type StationView } from '../state/store.ts';
 import { formatCash, formatGuestRate } from './format.ts';
 import { BuyButton, Sheet } from './Sheet.tsx';
+
+/** The rate below which a residual overflow is rounding, not a queue. */
+const QUEUE_EPSILON = 0.001;
+
+/**
+ * One line of the DOOR sheet's queue diagnosis, as data rather than as markup.
+ *
+ * Split out from the JSX for one reason: the branch is the fix, so the branch
+ * is what a test has to be able to reach. The UI tests have no DOM
+ * (`vitest.config.ts` runs on `node`), and this is pure, so the three states
+ * are pinned in CI without pulling in a renderer.
+ */
+export interface DoorDiagnosis {
+  /** Drives both the `⚠` and the `--warn` class — they are never separated. */
+  readonly warn: boolean;
+  readonly glyph: string;
+  /** The bolded lead-in, or null when the line is one plain sentence. */
+  readonly lead: string | null;
+  readonly body: string;
+}
+
+/**
+ * What to say about the guests who are not getting in.
+ *
+ * The old line was gated on magnitude alone, which made it advise "more lanes"
+ * at full lane build-out — the one state where no lane can be bought. Door Lv 8
+ * arrives at 3.225/s against 3.167/s of lane capacity, so 0.058/s is turned
+ * away permanently; that residual is the economy, not a problem, and it is
+ * reachable mid-run with every station still at Lv 7.
+ *
+ * So the gate is purchasability, not size. `⚠` is kept for exactly the case it
+ * teaches — a lane can still be bought — which is the same reasoning already
+ * written into the HUD banner: a warning the player cannot act on is just
+ * anxiety.
+ */
+export function doorDiagnosis(
+  turnedAway: number,
+  canAddLanes: boolean,
+  complete: boolean,
+): DoorDiagnosis {
+  if (turnedAway <= QUEUE_EPSILON) {
+    return {
+      warn: false,
+      glyph: '◦',
+      lead: null,
+      body: 'No queue. Every guest who arrives gets served.',
+    };
+  }
+
+  if (canAddLanes) {
+    return {
+      warn: true,
+      glyph: '⚠',
+      lead: 'Queue',
+      body: `${formatGuestRate(turnedAway)} turned away. More lanes before more guests.`,
+    };
+  }
+
+  // Nothing left to widen. Name the state, then point at the only lever that
+  // still does anything — or, at the end, say the club is finished. The last
+  // line a player ever reads on this sheet is an achievement, not a 1.8%
+  // shortfall dressed up as a fault.
+  return {
+    warn: false,
+    glyph: '◦',
+    lead: 'Full house',
+    body: `${formatGuestRate(turnedAway)} walk past. ${
+      complete ? 'The club is as big as it gets.' : 'Levels are what pay now.'
+    }`,
+  };
+}
+
+/**
+ * Whether a lane can still be bought anywhere in the club.
+ *
+ * Includes unlocking a station, which is how the second and third bars' lanes
+ * arrive. Both costs are `null` when the purchase does not exist, not when it is
+ * unaffordable — affordability is compared against cash separately — so this
+ * asks whether the advice is actionable at all, never whether the player can
+ * pay for it today.
+ */
+export function canAddLanes(
+  stations: readonly Pick<StationView, 'laneCost' | 'unlockCost'>[],
+): boolean {
+  return stations.some((st) => st.laneCost !== null || st.unlockCost !== null);
+}
 
 /**
  * The DOOR sheet: arrivals now versus capacity, and one purchase.
@@ -27,16 +113,10 @@ export function DoorSheet(): React.JSX.Element {
   const capacity = useGameStore((s) => s.capacityPerSecond);
   const turnedAway = useGameStore((s) => s.turnedAwayPerSecond);
   const stations = useGameStore((s) => s.stations);
+  const complete = useGameStore((s) => s.complete);
 
   const doorBinding = arrivals < capacity;
-
-  // Is "more lanes" something the player can still do? At full build-out every
-  // `laneCost` is null and 0.058/s is turned away for ever — by design, since
-  // Door Lv 8 is deliberately a hair ahead of three stations at three lanes. A
-  // warning naming a fix that no longer exists is a dead end, and §9's "no
-  // advice the player cannot act on" applies to the last minute of the game as
-  // much as the first.
-  const lanesBuyable = stations.some((s) => !s.unlocked || s.laneCost !== null);
+  const diagnosis = doorDiagnosis(turnedAway, canAddLanes(stations), complete);
 
   return (
     <Sheet
@@ -62,24 +142,26 @@ export function DoorSheet(): React.JSX.Element {
         </div>
       </div>
 
-      {turnedAway > 0.001 && lanesBuyable ? (
-        <p className="station-row__diagnosis station-row__diagnosis--warn">
-          <span aria-hidden="true">⚠</span> <strong>Queue</strong> —{' '}
-          {formatGuestRate(turnedAway)} turned away. More lanes before more guests.
-        </p>
-      ) : turnedAway > 0.001 ? (
-        // Every lane bought. The residual is a fact about a finished club, not
-        // a problem, so it is stated and not alarmed: no ⚠, no instruction, and
-        // nothing the player is being nagged to go and fix.
-        <p className="station-row__diagnosis">
-          <span aria-hidden="true">◦</span> {formatGuestRate(turnedAway)} turned away — every lane
-          is bought and the door runs a hair ahead of the bars.
-        </p>
-      ) : (
-        <p className="station-row__diagnosis">
-          <span aria-hidden="true">◦</span> No queue. Every guest who arrives gets served.
-        </p>
-      )}
+      <p
+        className={`station-row__diagnosis${
+          diagnosis.warn ? ' station-row__diagnosis--warn' : ''
+        }`}
+      >
+        <span aria-hidden="true">{diagnosis.glyph}</span>
+        {/* Lead and body in one span, the way the HUD banner already does it.
+            The paragraph is a flex row, so a bare `<strong>` is its own column:
+            "Queue" is one word and survived that, but "Full house" broke across
+            two lines with the sentence beside it. Inside one span the sentence
+            flows and the glyph stays outdented. */}
+        <span>
+          {diagnosis.lead !== null && (
+            <>
+              <strong>{diagnosis.lead}</strong> —{' '}
+            </>
+          )}
+          {diagnosis.body}
+        </span>
+      </p>
 
       {/* Same terminal-state rule as the Bars sheet: at Lv 8 "Upgrade to Door
           Lv 8" is literally wrong, so the label states where the door is
