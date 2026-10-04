@@ -447,6 +447,9 @@
 
 .station-row__diagnosis--warn strong {
   color: var(--warn-amber);
+  /* The type scale is two weights, 400 and 600. Setting colour alone lets the
+     UA default 700 through, which is as much an off-scale value as a raw hex. */
+  font-weight: var(--weight-semibold);
 }
 
 .station-row__buys {
@@ -833,6 +836,7 @@
 
 .card__note--next strong {
   color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
 }
 
 .stats {

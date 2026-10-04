@@ -10,16 +10,18 @@ import {
   upgradeStation,
   type ClubState,
 } from '../sim/clubState.ts';
-import { canAddLanes, doorDiagnosis } from './DoorSheet.tsx';
+import { canAddLanes, doorDiagnosis, stationDiagnosis, type Diagnosis } from './diagnosis.ts';
 
 /**
- * The DOOR sheet's queue line (DUB-13).
+ * The two sheets' queue lines (DUB-13 on the Door, design review item E on the
+ * Bars).
  *
- * The bug was that the line branched on how big the overflow was instead of on
- * whether the player could do anything about it, so it advised "more lanes" in
- * the state where every lane is already bought. Two things are pinned here: the
- * copy each state produces, and the economy fact that makes the dead end
- * reachable mid-run rather than only at full build-out.
+ * Both had the same bug: the line branched on how big the shortfall was, or on
+ * saturation alone, instead of on whether the player could do anything about
+ * it — so each advised "more lanes" in the state where every lane is already
+ * bought. Three things are pinned here: the copy each state produces, the rule
+ * that `⚠` never appears without a purchasable fix, and the economy fact that
+ * makes the dead end reachable mid-run rather than only at full build-out.
  */
 
 /** A `StationView` stub with only the two fields the predicate reads. */
@@ -28,7 +30,7 @@ function station(laneCost: number | null, unlockCost: number | null) {
 }
 
 /** Flatten a diagnosis to the sentence the player sees, glyph included. */
-function line(d: ReturnType<typeof doorDiagnosis>): string {
+function line(d: Diagnosis): string {
   return d.lead === null ? `${d.glyph} ${d.body}` : `${d.glyph} ${d.lead} — ${d.body}`;
 }
 
@@ -89,6 +91,84 @@ describe('the DOOR sheet queue diagnosis', () => {
     // than re-measuring a screenshot every time the copy is edited.
     for (const complete of [false, true]) {
       expect(line(doorDiagnosis(0.058, false, complete)).length).toBeLessThanOrEqual(64);
+    }
+  });
+});
+
+describe('the BARS sheet station diagnosis', () => {
+  /** A `StationView` stub with only the fields the diagnosis reads. */
+  function view(over: Partial<Parameters<typeof stationDiagnosis>[0]> = {}) {
+    return {
+      saturated: false,
+      idleLanes: 0,
+      laneCost: 120 as number | null,
+      maxed: false,
+      servedPerSecond: 1,
+      capacityPerSecond: 2,
+      ...over,
+    };
+  }
+
+  it('says nothing when the station is neither queueing nor idling', () => {
+    expect(stationDiagnosis(view({ idleLanes: 0.2 }))).toBeNull();
+  });
+
+  it('warns — and advises a lane — while a lane can still be bought', () => {
+    const d = stationDiagnosis(view({ saturated: true, laneCost: 120 }));
+
+    expect(d?.warn).toBe(true);
+    expect(line(d!)).toBe('⚠ Queue — every lane is busy. Add a lane.');
+  });
+
+  // Item E. The warning used to fire here, one row above a button reading
+  // "3 LANES", on all three cards at once behind the CLUB COMPLETE card.
+  it('states the fact without an imperative once every lane is bought', () => {
+    const d = stationDiagnosis(view({ saturated: true, laneCost: null }));
+
+    expect(d?.warn).toBe(false);
+    expect(line(d!)).toBe('◦ Full house — every lane is pouring. Levels are what pay now.');
+  });
+
+  it('names no lever at all when the level axis is finished too', () => {
+    const d = stationDiagnosis(view({ saturated: true, laneCost: null, maxed: true }));
+
+    expect(d?.warn).toBe(false);
+    expect(line(d!)).toBe('◦ Full house — this bar is as big as it gets.');
+  });
+
+  it('never shows ⚠ when no lane is purchasable, maxed or not', () => {
+    for (const maxed of [false, true]) {
+      const d = stationDiagnosis(view({ saturated: true, laneCost: null, maxed }));
+      expect(d?.warn).toBe(false);
+      expect(d?.glyph).not.toBe('⚠');
+    }
+  });
+
+  it('counts idle lanes in whole bartenders, never a decimal and never zero', () => {
+    // "1.0 lanes idle" reads as a rendering bug; and the 0.5 threshold must not
+    // be able to round down to "0 lanes idle", which would say nothing at all.
+    for (const [idleLanes, expected] of [
+      [0.5, '1 lane'],
+      [1, '1 lane'],
+      [1.4, '1 lane'],
+      [1.6, '2 lanes'],
+      [2.5, '3 lanes'],
+    ] as const) {
+      const d = stationDiagnosis(view({ idleLanes }));
+      expect(d?.body).toBe(`${expected} idle — raise the Door, not the lanes.`);
+    }
+  });
+
+  it('keeps every line inside the two-line box at 390 px', () => {
+    // Same 64-character budget the Door lines are held to.
+    for (const over of [
+      { saturated: true, laneCost: 120 },
+      { saturated: true, laneCost: null },
+      { saturated: true, laneCost: null, maxed: true },
+      { idleLanes: 2 },
+    ]) {
+      const d = stationDiagnosis(view(over));
+      expect(line(d!).length).toBeLessThanOrEqual(64);
     }
   });
 });

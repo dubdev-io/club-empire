@@ -257,6 +257,11 @@ export async function startGame(parent: HTMLElement): Promise<GameRuntime> {
     }
 
     if (club.derived.complete && !club.completeSeen) {
+      // The last purchase in the game is Booth lane 3, bought from the BARS
+      // sheet, so this fires with a sheet open every time on the real path.
+      // The card is the payoff image and it should land over the finished
+      // room, not over a list of rows.
+      store.getState().closeSheet();
       store.getState().setShowComplete(true);
     }
   }

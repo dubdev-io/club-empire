@@ -1,5 +1,6 @@
 import { MAX_LANES, MAX_STATION_LEVEL } from '../config/economy.ts';
 import { useGameStore, type StationView } from '../state/store.ts';
+import { stationDiagnosis } from './diagnosis.ts';
 import { formatCash, formatGuestRate } from './format.ts';
 import { BuyButton, Sheet } from './Sheet.tsx';
 
@@ -59,6 +60,8 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
     );
   }
 
+  const diagnosis = stationDiagnosis(station);
+
   return (
     <section className="station-row">
       <header className="station-row__head">
@@ -100,22 +103,39 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
         {formatGuestRate(station.capacityPerSecond)} · {formatCash(station.pricePerGuest)} a guest
       </p>
 
-      {station.saturated ? (
-        <p className="station-row__diagnosis station-row__diagnosis--warn">
-          <span aria-hidden="true">⚠</span> <strong>Queue</strong> — every lane is busy. Add a lane.
+      {/* Gated on whether a lane can be bought, not on saturation alone — see
+          `stationDiagnosis`. The `<strong>` and the sentence share one span for
+          the same reason the Door sheet does it: the paragraph is a flex row,
+          so a bare `<strong>` becomes its own column and "Full house" breaks
+          across two lines with the sentence beside it. */}
+      {diagnosis !== null && (
+        <p
+          className={`station-row__diagnosis${
+            diagnosis.warn ? ' station-row__diagnosis--warn' : ''
+          }`}
+        >
+          <span aria-hidden="true">{diagnosis.glyph}</span>
+          <span>
+            {diagnosis.lead !== null && (
+              <>
+                <strong>{diagnosis.lead}</strong> —{' '}
+              </>
+            )}
+            {diagnosis.body}
+          </span>
         </p>
-      ) : station.idleLanes >= 0.5 ? (
-        <p className="station-row__diagnosis">
-          <span aria-hidden="true">◦</span> {station.idleLanes.toFixed(1)} lanes idle — raise the
-          Door, not the lanes.
-        </p>
-      ) : null}
+      )}
 
       <div className="station-row__buys">
-        {/* A maxed station must not read as an action. "Upgrade to Lv 30" on a
-            station already at 30 is literally wrong, so the label becomes the
-            terminal state and the price slot carries the badge — the same shape
-            the lane button already uses when it reaches 3 lanes. */}
+        {/* Neither button may read as an action once its axis is finished:
+            "Upgrade to Lv 30" at Lv 30, or "+ Lane 3" at three lanes, is
+            literally wrong. So the label states where the axis is and the price
+            slot says how far through it is — the same `Lv 8 of 8` shape the
+            Door sheet uses.
+
+            The badge deliberately carries no stars. The header two rows up
+            already shows ★★★ and the level, and design review asked for one of
+            them rather than the same two facts twice within 140 px. */}
         <BuyButton
           label={
             station.maxed
@@ -124,14 +144,18 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
           }
           price={formatCash(station.upgradeCost ?? 0)}
           affordable={station.upgradeCost !== null && cash >= station.upgradeCost}
-          doneLabel={station.maxed ? '★★★' : undefined}
+          doneLabel={station.maxed ? `Lv ${MAX_STATION_LEVEL} of ${MAX_STATION_LEVEL}` : undefined}
           onBuy={() => actions.upgradeStation(station.key)}
         />
         <BuyButton
-          label={`+ Lane ${Math.min(station.lanes + 1, MAX_LANES)}`}
+          label={
+            station.laneCost === null
+              ? `${MAX_LANES} lanes — maxed`
+              : `+ Lane ${Math.min(station.lanes + 1, MAX_LANES)}`
+          }
           price={formatCash(station.laneCost ?? 0)}
           affordable={station.laneCost !== null && cash >= station.laneCost}
-          doneLabel={station.laneCost === null ? `${MAX_LANES} LANES` : undefined}
+          doneLabel={station.laneCost === null ? `${MAX_LANES} of ${MAX_LANES}` : undefined}
           accent="cyan"
           onBuy={() => actions.buyLane(station.key)}
         />
@@ -152,9 +176,12 @@ function starProgressPercent(station: StationView): number {
 function Stars({ count }: { readonly count: number }): React.JSX.Element {
   return (
     <span className="stars" aria-label={`${count} of 3 stars`}>
+      {/* Earned and unearned differ in glyph, not only in colour (§9). The
+          dimmed ★ was legible next to "N to ★" and the level, but a hollow ☆
+          carries the state in shape for free. */}
       {[0, 1, 2].map((i) => (
         <span key={i} className={i < count ? 'stars__on' : 'stars__off'} aria-hidden="true">
-          ★
+          {i < count ? '★' : '☆'}
         </span>
       ))}
     </span>
