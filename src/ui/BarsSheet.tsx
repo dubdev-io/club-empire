@@ -35,6 +35,13 @@ export function BarsSheet(): React.JSX.Element {
 function StationRow({ station }: { readonly station: StationView }): React.JSX.Element {
   const cash = useGameStore((s) => s.cash);
   const actions = useGameStore((s) => s.actions);
+  // One primitive per value, which is what the fast/structure split exists
+  // for. Selecting a snapshot object here would hand every row a fresh
+  // reference ten times a second; selecting the numbers means a row re-renders
+  // only when a number it reads actually changes.
+  const turnedAway = useGameStore((s) => s.turnedAwayPerSecond);
+  const arrivals = useGameStore((s) => s.arrivalsPerSecond);
+  const doorMaxed = useGameStore((s) => s.doorMaxed);
 
   if (!station.unlocked) {
     const cost = station.unlockCost ?? 0;
@@ -60,7 +67,7 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
     );
   }
 
-  const diagnosis = stationDiagnosis(station);
+  const diagnosis = stationDiagnosis(station, turnedAway, arrivals, doorMaxed);
 
   return (
     <section className="station-row">
@@ -103,8 +110,10 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
         {formatGuestRate(station.capacityPerSecond)} · {formatCash(station.pricePerGuest)} a guest
       </p>
 
-      {/* Gated on whether a lane can be bought, not on saturation alone — see
-          `stationDiagnosis`. The `<strong>` and the sentence share one span for
+      {/* Two axes, neither of them this station's saturation on its own: a lane
+          that can be bought decides whether advice is given, and the club's
+          door queue decides whether it shouts — see `stationDiagnosis`. The
+          `<strong>` and the sentence share one span for
           the same reason the Door sheet does it: the paragraph is a flex row,
           so a bare `<strong>` becomes its own column and "Full house" breaks
           across two lines with the sentence beside it. */}
