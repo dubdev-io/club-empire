@@ -18,11 +18,17 @@ Nothing else goes before that line — the merger matches it after stripping any
 
 **2. The person or agent who merges reads that first line.** Do not wait for a green check. A pull request that we opened will never get one.
 
+If no review on the pull request has a conforming first line, there is no verdict. Do not merge; ask the reviewer for one.
+
 **3. The same verdict goes on the review issue in Paperclip.** The board is our record of approval, not GitHub.
 
 **4. Never review your own pull request.** The author must not write the review. One shared account is not a reason to drop to one pair of eyes.
 
 **5. Do not switch on the "Require approvals" branch protection rule.** While we share one account it would make every pull request of ours impossible to merge.
+
+**6. Several reviewers.** When a pull request has more than one reviewer, each posts their own verdict review. The merger needs a conforming `APPROVE` or `APPROVE WITH NITS` from every reviewer who was asked. The reviewers who were asked are the ones named on the Paperclip review issue, not the GitHub Reviewers field — on our pull requests that field cannot name us. A single `REQUEST CHANGES` outranks all of them.
+
+**7. A verdict applies to the commit it was posted against.** Name the commit you reviewed in your review. The merger checks that the named commit is the current head before merging; if it is not, there is no current verdict. If the author pushes after a verdict, that verdict is stale — the author says so in a comment and asks for a re-review.
 
 ---
 
@@ -35,7 +41,7 @@ Verified on 2026-10-04: the GitHub identity in use is **`prioa`** (`get-me` → 
 ### What it costs us
 
 - GitHub's own review history is useless as proof of review. Every review in it is a `COMMENT` by `prioa`. You cannot tell from GitHub whether a pull request was reviewed, by whom, or what they concluded. Only the Paperclip issue can tell you that. Rule 3 exists for this reason alone.
-- We cannot use any branch protection rule that counts approvals, and we cannot use GitHub's "dismiss stale approvals" behaviour. Rule 5.
+- We cannot use any branch protection rule that counts approvals, and we cannot use GitHub's "dismiss stale approvals" behaviour. Rules 5 and 7.
 - Nothing is blocked today. PR #11 merged with no approval on it, which confirms no protection rule is currently demanding one.
 
 ### The failure this prevents
@@ -44,8 +50,8 @@ A merging agent that waits for a green check waits forever, and the natural next
 
 ### The thing this does not fix
 
-A second GitHub account, added to the repository as a collaborator and used only by the reviewing agents, would restore real `APPROVE` and `REQUEST CHANGES`, make GitHub's review history meaningful again, and let us turn on required-approval branch protection. That needs the owner to create the account and add it. It is asked on DUB-23. Until the answer is yes, the five rules above are what we do.
+A second GitHub account, added to the repository as a collaborator and used only by the reviewing agents, would restore real `APPROVE` and `REQUEST CHANGES`, make GitHub's review history meaningful again, and let us turn on required-approval branch protection. That needs the owner to create the account and add it. It is asked on Paperclip issue DUB-23. Until the answer is yes, the seven rules above are what we do.
 
 ## Where this came from
 
-PR [#11](https://github.com/dubdev-io/club-empire/pull/11), reviewed under DUB-23. The Web Developer hit the refusal while reviewing, posted the verdict as the first line of a `COMMENT` review, and flagged that every pull request we review will hit the same wall. The Game Developer merged on that first line and seconded the flag.
+PR [#11](https://github.com/dubdev-io/club-empire/pull/11), reviewed under Paperclip issue DUB-23. The Web Developer hit the refusal while reviewing, posted the verdict as the first line of a `COMMENT` review, and flagged that every pull request we review will hit the same wall. The Game Developer merged on that first line and seconded the flag.
