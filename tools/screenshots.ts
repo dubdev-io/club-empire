@@ -342,6 +342,19 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 900,
   },
+  {
+    // Second zero of a brand-new save, which is the state 14 and 15 do not
+    // cover: 0.90/s arriving against 0.50/s served, so the `min()` binds and
+    // 44% of guests are turned away — below `QUEUE_WARNING_SHARE`, which is why
+    // the HUD banner and the DOOR badge both stay quiet here. The sheet used to
+    // be the only surface that went amber, on the first screen of every run,
+    // for a lane the player cannot afford for another three and a half minutes.
+    name: '16-door-fresh',
+    note: 'DOOR sheet on a fresh club — the min() already binds at 44%, below the alarm threshold',
+    seed: FRESH,
+    drive: `window.__clubStore.getState().openSheet('door');`,
+    settleMs: 700,
+  },
 ];
 
 // ---------------------------------------------------------------------------

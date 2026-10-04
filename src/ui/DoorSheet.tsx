@@ -1,4 +1,4 @@
-import { DOOR_MAX } from '../config/economy.ts';
+import { DOOR_MAX, QUEUE_WARNING_SHARE } from '../config/economy.ts';
 import { useGameStore, type StationView } from '../state/store.ts';
 import { formatCash, formatGuestRate } from './format.ts';
 import { BuyButton, Sheet } from './Sheet.tsx';
@@ -11,8 +11,8 @@ const QUEUE_EPSILON = 0.001;
  *
  * Split out from the JSX for one reason: the branch is the fix, so the branch
  * is what a test has to be able to reach. The UI tests have no DOM
- * (`vitest.config.ts` runs on `node`), and this is pure, so the three states
- * are pinned in CI without pulling in a renderer.
+ * (`vitest.config.ts` runs on `node`), and this is pure, so all five states are
+ * pinned in CI without pulling in a renderer.
  */
 export interface DoorDiagnosis {
   /** Drives both the `⚠` and the `--warn` class — they are never separated. */
@@ -26,19 +26,31 @@ export interface DoorDiagnosis {
 /**
  * What to say about the guests who are not getting in.
  *
- * The old line was gated on magnitude alone, which made it advise "more lanes"
- * at full lane build-out — the one state where no lane can be bought. Door Lv 8
- * arrives at 3.225/s against 3.167/s of lane capacity, so 0.058/s is turned
- * away permanently; that residual is the economy, not a problem, and it is
- * reachable mid-run with every station still at Lv 7.
+ * The original line was gated on magnitude alone, which made it advise "more
+ * lanes" at full lane build-out — the one state where no lane can be bought.
+ * Door Lv 8 arrives at 3.225/s against 3.167/s of lane capacity, so 0.058/s is
+ * turned away permanently; that residual is the economy, not a problem, and it
+ * is reachable mid-run with every station still at Lv 7.
  *
- * So the gate is purchasability, not size. `⚠` is kept for exactly the case it
- * teaches — a lane can still be bought — which is the same reasoning already
- * written into the HUD banner: a warning the player cannot act on is just
- * anxiety.
+ * The `⚠` is therefore gated on two things, not one:
+ *
+ * - **Purchasability.** A warning the player cannot act on is just anxiety —
+ *   the reasoning already written into the HUD banner. At full lane build-out
+ *   there is no lane to buy, so the line names the state and points at levels.
+ * - **Severity**, via the same `QUEUE_WARNING_SHARE` the HUD banner and the
+ *   DOOR tab badge use. A fresh club serves 0.50/s against 0.90/s arriving, so
+ *   a sheet that alarmed whenever the `min()` binds would be amber from the
+ *   first second of every run, advising a lane the player cannot afford for
+ *   three and a half minutes. This sheet was the only surface ignoring that
+ *   threshold.
+ *
+ * Below the threshold the advice is identical and only the register changes —
+ * "walk past" rather than "turned away", `◦` rather than `⚠`. The right move
+ * does not depend on how bad the queue is; only the urgency does.
  */
 export function doorDiagnosis(
   turnedAway: number,
+  arrivals: number,
   canAddLanes: boolean,
   complete: boolean,
 ): DoorDiagnosis {
@@ -51,25 +63,38 @@ export function doorDiagnosis(
     };
   }
 
+  const rate = formatGuestRate(turnedAway);
+
   if (canAddLanes) {
-    return {
-      warn: true,
-      glyph: '⚠',
-      lead: 'Queue',
-      body: `${formatGuestRate(turnedAway)} turned away. More lanes before more guests.`,
-    };
+    // Same share the HUD computes, same guard against a zero denominator.
+    const share = arrivals > 0 ? turnedAway / arrivals : 0;
+
+    return share >= QUEUE_WARNING_SHARE
+      ? {
+          warn: true,
+          glyph: '⚠',
+          lead: 'Queue',
+          body: `${rate} turned away. More lanes before more guests.`,
+        }
+      : {
+          warn: false,
+          glyph: '◦',
+          lead: null,
+          body: `${rate} walk past. More lanes before more guests.`,
+        };
   }
 
   // Nothing left to widen. Name the state, then point at the only lever that
   // still does anything — or, at the end, say the club is finished. The last
   // line a player ever reads on this sheet is an achievement, not a 1.8%
-  // shortfall dressed up as a fault.
+  // shortfall dressed up as a fault, and not a ceiling the completion card's
+  // own "Phase 2: a second venue" immediately contradicts.
   return {
     warn: false,
     glyph: '◦',
     lead: 'Full house',
-    body: `${formatGuestRate(turnedAway)} walk past. ${
-      complete ? 'The club is as big as it gets.' : 'Levels are what pay now.'
+    body: `${rate} walk past. ${
+      complete ? "You've built it all." : 'Levels are what pay now.'
     }`,
   };
 }
@@ -116,7 +141,7 @@ export function DoorSheet(): React.JSX.Element {
   const complete = useGameStore((s) => s.complete);
 
   const doorBinding = arrivals < capacity;
-  const diagnosis = doorDiagnosis(turnedAway, canAddLanes(stations), complete);
+  const diagnosis = doorDiagnosis(turnedAway, arrivals, canAddLanes(stations), complete);
 
   return (
     <Sheet

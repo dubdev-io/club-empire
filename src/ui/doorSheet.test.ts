@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DOOR_MAX, MAX_LANES } from '../config/economy.ts';
+import { DOOR_MAX, MAX_LANES, QUEUE_WARNING_SHARE } from '../config/economy.ts';
 import {
   buyLane,
   createClubState,
@@ -17,9 +17,12 @@ import { canAddLanes, doorDiagnosis } from './DoorSheet.tsx';
  *
  * The bug was that the line branched on how big the overflow was instead of on
  * whether the player could do anything about it, so it advised "more lanes" in
- * the state where every lane is already bought. Two things are pinned here: the
- * copy each state produces, and the economy fact that makes the dead end
- * reachable mid-run rather than only at full build-out.
+ * the state where every lane is already bought — and fired the game's only
+ * alarm glyph on a fresh club, where the HUD banner and the DOOR badge both
+ * correctly stay quiet. Three things are pinned here: the copy each of the five
+ * states produces, that `⚠` needs both severity and purchasability, and the
+ * economy fact that makes the dead end reachable mid-run rather than only at
+ * full build-out.
  */
 
 /** A `StationView` stub with only the two fields the predicate reads. */
@@ -47,53 +50,111 @@ describe('canAddLanes', () => {
 });
 
 describe('the DOOR sheet queue diagnosis', () => {
-  it('says nothing is queueing when nothing is', () => {
-    const d = doorDiagnosis(0, true, false);
+  it('A — says nothing is queueing when nothing is', () => {
+    const d = doorDiagnosis(0, 0.9, true, false);
 
     expect(d.warn).toBe(false);
     expect(line(d)).toBe('◦ No queue. Every guest who arrives gets served.');
   });
 
-  it('warns — and advises lanes — while a lane can still be bought', () => {
-    const d = doorDiagnosis(1.42, true, false);
+  it('B — warns once most arrivals are being turned away and a lane is buyable', () => {
+    // The flooded door: 3.22/s arriving, 0.50/s served, 84% turned away.
+    const d = doorDiagnosis(2.72, 3.22, true, false);
 
     expect(d.warn).toBe(true);
-    expect(line(d)).toBe('⚠ Queue — 1.42/s turned away. More lanes before more guests.');
+    expect(line(d)).toBe('⚠ Queue — 2.72/s turned away. More lanes before more guests.');
   });
 
-  it('points at levels, without a warning, once every lane is bought', () => {
-    const d = doorDiagnosis(0.058, false, false);
+  it('C — gives the same advice without the alarm on a fresh club', () => {
+    // Second zero of every run: 0.90/s arriving, 0.50/s served, 44% turned
+    // away, and the Door Lv 2 buy locked behind cash for three more minutes.
+    const d = doorDiagnosis(0.4, 0.9, true, false);
+
+    expect(d.warn).toBe(false);
+    expect(line(d)).toBe('◦ 0.40/s walk past. More lanes before more guests.');
+  });
+
+  it('C/B — the amber tier starts exactly at QUEUE_WARNING_SHARE', () => {
+    const arrivals = 2;
+    const at = doorDiagnosis(arrivals * QUEUE_WARNING_SHARE, arrivals, true, false);
+    const below = doorDiagnosis(arrivals * QUEUE_WARNING_SHARE - 0.01, arrivals, true, false);
+
+    expect(at.warn).toBe(true);
+    expect(below.warn).toBe(false);
+    // Only the register moves across the boundary; the advice does not.
+    expect(at.body).toContain('More lanes before more guests.');
+    expect(below.body).toContain('More lanes before more guests.');
+  });
+
+  it('D1 — points at levels, without a warning, once every lane is bought', () => {
+    const d = doorDiagnosis(0.058, 3.225, false, false);
 
     expect(d.warn).toBe(false);
     expect(line(d)).toBe('◦ Full house — 0.06/s walk past. Levels are what pay now.');
   });
 
-  it('reads as finished when the club is complete', () => {
-    const d = doorDiagnosis(0.058, false, true);
+  it('D2 — reads as finished when the club is complete', () => {
+    const d = doorDiagnosis(0.058, 3.225, false, true);
 
     expect(d.warn).toBe(false);
-    expect(line(d)).toBe('◦ Full house — 0.06/s walk past. The club is as big as it gets.');
+    expect(line(d)).toBe("◦ Full house — 0.06/s walk past. You've built it all.");
   });
 
-  it('never shows ⚠ when no lane is purchasable, at any overflow rate', () => {
+  it('never shows ⚠ when no lane is purchasable, at any overflow share', () => {
     for (const rate of [0.002, 0.058, 0.5, 3.2, 40]) {
-      const d = doorDiagnosis(rate, false, false);
+      for (const arrivals of [0, 0.9, 3.225, 40]) {
+        const d = doorDiagnosis(rate, arrivals, false, false);
+        expect(d.warn).toBe(false);
+        expect(d.glyph).not.toBe('⚠');
+      }
+    }
+  });
+
+  it('never shows ⚠ below the share the HUD and the DOOR badge use', () => {
+    // The sheet was the only surface ignoring this threshold; the point of the
+    // fix is that all three now agree about when the glyph is earned.
+    for (const share of [0, 0.1, 0.3, 0.44, 0.499]) {
+      const d = doorDiagnosis(share * 3.225, 3.225, true, false);
       expect(d.warn).toBe(false);
       expect(d.glyph).not.toBe('⚠');
     }
   });
 
-  it('keeps both dead-end strings inside the two-line box at 390 px', () => {
+  it('keeps every string inside the two-line box at 390 px', () => {
     // Measured at 390x844: the diagnosis box fits 64 characters on two lines
     // before it pushes the buy button down. Guarding the length here is cheaper
     // than re-measuring a screenshot every time the copy is edited.
-    for (const complete of [false, true]) {
-      expect(line(doorDiagnosis(0.058, false, complete)).length).toBeLessThanOrEqual(64);
+    const lines = [
+      doorDiagnosis(0, 0.9, true, false),
+      doorDiagnosis(2.72, 3.22, true, false),
+      doorDiagnosis(0.4, 0.9, true, false),
+      doorDiagnosis(0.058, 3.225, false, false),
+      doorDiagnosis(0.058, 3.225, false, true),
+    ];
+
+    for (const d of lines) {
+      expect(line(d).length).toBeLessThanOrEqual(64);
     }
   });
 });
 
-describe('the state the dead-end copy exists for', () => {
+describe('the two states the new copy exists for', () => {
+  it('a fresh club overflows below the warning share, so tier C is the first-run state', () => {
+    const club = createClubState();
+    const { arrivalsPerSecond: arrivals, turnedAwayPerSecond: turnedAway } = club.derived.flow;
+
+    // 0.90/s arriving against 0.50/s served — the `min()` binds from second
+    // zero, which is exactly why gating on magnitude alone lit the alarm on a
+    // brand-new save.
+    expect(turnedAway).toBeGreaterThan(0.001);
+    expect(turnedAway / arrivals).toBeLessThan(QUEUE_WARNING_SHARE);
+
+    const d = doorDiagnosis(turnedAway, arrivals, true, false);
+    expect(d.warn).toBe(false);
+    expect(d.glyph).toBe('◦');
+    expect(d.body).toContain('walk past. More lanes before more guests.');
+  });
+
   /** Door maxed, every lane bought, stations left at `level`. */
   function fullLanes(level: number): ClubState {
     const club = createClubState();
@@ -138,5 +199,28 @@ describe('the state the dead-end copy exists for', () => {
     );
     expect(canAddLanes(views)).toBe(false);
     expect(club.derived.complete).toBe(false);
+  });
+
+  it('a flooded door with two stations still locked stays in the warning tier', () => {
+    const club = createClubState();
+    while (club.doorLevel < DOOR_MAX) {
+      creditCash(club, 1e9);
+      if (upgradeDoor(club) !== 'bought') break;
+    }
+
+    const { arrivalsPerSecond: arrivals, turnedAwayPerSecond: turnedAway } = club.derived.flow;
+    const views = club.stations.map((st) =>
+      station(st.lanes < MAX_LANES ? 1 : null, st.unlocked ? null : 1),
+    );
+
+    // Unlocking a station is how its lanes arrive, so a locked station is a
+    // lane that can be bought — the line must not read as a dead end here.
+    expect(club.stations.filter((st) => !st.unlocked)).toHaveLength(2);
+    expect(canAddLanes(views)).toBe(true);
+    expect(turnedAway / arrivals).toBeGreaterThanOrEqual(QUEUE_WARNING_SHARE);
+
+    const d = doorDiagnosis(turnedAway, arrivals, canAddLanes(views), club.derived.complete);
+    expect(d.warn).toBe(true);
+    expect(d.lead).toBe('Queue');
   });
 });
