@@ -15,7 +15,8 @@
     "sim:economy": "node tools/economy-sim.ts",
     "sim:autobuy": "node tools/autobuy.ts",
     "shots": "node tools/screenshots.ts",
-    "measure:frames": "node tools/frametime.ts"
+    "measure:frames": "node tools/frametime.ts",
+    "measure:boot": "node tools/boot-progress.ts"
   },
   "dependencies": {
     "pixi.js": "8.22.0",

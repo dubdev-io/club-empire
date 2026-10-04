@@ -1,0 +1,404 @@
+/**
+ * Does the boot progress bar actually reach the screen once the load passes 1 s?
+ *
+ *   CLUB_URL=http://127.0.0.1:4173 node tools/boot-progress.ts 1 6 10 20
+ *
+ * DUB-21: the bar was gated by a `setTimeout` scheduled from the boot screen's
+ * effect, and on a slow load that timer never ran. Not because it was wrong, but
+ * because `startGame` holds the main thread in long tasks for the whole boot
+ * window — so the timer came due while the thread was busy and the boot screen
+ * had already unmounted by the time it was free. The bar therefore appeared only
+ * on loads where `.boot` mounted *after* t=1000 and the `useState` initializer
+ * caught it, which is the opposite of the case the threshold exists for.
+ *
+ * This script is the regression instrument, and it measures two different things
+ * on purpose:
+ *
+ *  - `missingDom` — frames where `.boot` is mounted at t >= 1000 and
+ *    `.boot__progress` is not in the DOM. This is QA's acceptance criterion
+ *    (`qa-harness/scripts/boot-progress-timeline.mjs`).
+ *  - `missingPaint` — the same frames where the bar is in the DOM but still
+ *    fully transparent. DOM presence is not visibility, and the reveal is a CSS
+ *    animation precisely so that it survives a blocked main thread; this column
+ *    is what proves it did.
+ *
+ * Needs a preview server and a headless Chrome with `--remote-debugging-port`,
+ * the same pair `npm run measure:frames` uses. CPU throttling is applied through
+ * CDP, which is the only knob here that moves the boot window across the 1 s
+ * gate — mount time, not the throttle rate, is what decides the outcome.
+ */
+
+const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:4173';
+const DEBUG_URL = process.env.CLUB_CDP ?? 'http://127.0.0.1:9222';
+
+/** Same threshold the component uses. Kept as a literal: this is the oracle. */
+const GATE_MS = 1000;
+
+/** One frame of slack at the gate, so a sample landing on it is not a failure. */
+const GRACE_MS = 32;
+
+/** How many times to repeat each rate. The failure was intermittent by nature. */
+const REPEATS = Number(process.env.CLUB_BOOT_REPEATS ?? 1);
+
+const RATES = process.argv.slice(2).map(Number).filter(Number.isFinite);
+
+interface Sample {
+  t: number;
+  boot: boolean;
+  bar: boolean;
+  opacity: number;
+}
+
+interface Timeline {
+  samples: Sample[];
+  events: { t: number; name: string }[];
+  longTasks: { start: number; dur: number }[];
+}
+
+interface RunReport {
+  rate: number;
+  repeat: number;
+  bootFrom: number | null;
+  bootTo: number | null;
+  barFrom: number | null;
+  /** Ms the boot screen was on screen past the threshold, and so owed a bar. */
+  owedMs: number;
+  /** Of those, ms with no `.boot__progress` in the DOM. The acceptance figure. */
+  missingDomMs: number;
+  /** Frames inside the owed window the probe actually got to sample. */
+  samples: number;
+  /** Of those, frames where the bar was in the DOM but fully transparent. */
+  missingPaint: number;
+  busyMsAfterGate: number;
+  verdict: 'pass' | 'fail' | 'n/a';
+}
+
+class Cdp {
+  private readonly socket: WebSocket;
+  private nextId = 1;
+  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+
+  private constructor(socket: WebSocket) {
+    this.socket = socket;
+    this.socket.addEventListener('message', (event) => {
+      const message = JSON.parse(String((event as MessageEvent).data)) as {
+        id?: number;
+        result?: unknown;
+        error?: { message: string };
+      };
+      if (message.id === undefined) return;
+      const waiter = this.pending.get(message.id);
+      if (waiter === undefined) return;
+      this.pending.delete(message.id);
+      if (message.error) waiter.reject(new Error(message.error.message));
+      else waiter.resolve(message.result);
+    });
+  }
+
+  static async connect(wsUrl: string): Promise<Cdp> {
+    const socket = new WebSocket(wsUrl);
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener('open', () => resolve(), { once: true });
+      socket.addEventListener('error', () => reject(new Error(`cannot connect to ${wsUrl}`)), { once: true });
+    });
+    return new Cdp(socket);
+  }
+
+  send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    const id = this.nextId++;
+    this.socket.send(JSON.stringify({ id, method, params }));
+    return new Promise<T>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
+      }, 180_000);
+    });
+  }
+
+  async evaluate<T = unknown>(expression: string): Promise<T> {
+    const result = await this.send<{
+      result: { value?: T };
+      exceptionDetails?: { text: string; exception?: { description?: string } };
+    }>('Runtime.evaluate', {
+      expression: `(() => { ${expression} })()`,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (result.exceptionDetails) {
+      throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
+    }
+    return result.result.value as T;
+  }
+
+  close(): void {
+    this.socket.close();
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The in-page probe, installed before a byte of the bundle has run.
+ *
+ * It parks its result in `localStorage` rather than waiting to be read, because
+ * by the time the boot screen is gone the running game owns the main thread and
+ * a `Runtime.evaluate` against it can take tens of seconds. The driver reads the
+ * record back from a quiet `?noboot=1` page instead.
+ */
+const PROBE = `
+(() => {
+  const timeline = { samples: [], events: [], longTasks: [] };
+  window.__clubBootTimeline = timeline;
+
+  let boot = false;
+  let bar = false;
+
+  const read = () => {
+    const bootEl = document.querySelector('.boot');
+    const barEl = document.querySelector('.boot__progress');
+    return {
+      t: Math.round(performance.now()),
+      boot: Boolean(bootEl),
+      bar: Boolean(barEl),
+      opacity: barEl ? Number(getComputedStyle(barEl).opacity) : 0,
+    };
+  };
+
+  const save = () => {
+    try { localStorage.setItem('__clubBootTimeline', JSON.stringify(timeline)); } catch {}
+  };
+
+  const edges = (sample) => {
+    if (sample.boot !== boot) {
+      boot = sample.boot;
+      timeline.events.push({ t: sample.t, name: boot ? 'boot-mount' : 'boot-unmount' });
+      // Flushed on the unmount edge: everything the criterion cares about has
+      // happened by then, and the game is about to take the thread.
+      if (!boot) save();
+    }
+    if (sample.bar !== bar) {
+      bar = sample.bar;
+      timeline.events.push({ t: sample.t, name: bar ? 'bar-in-dom' : 'bar-out-of-dom' });
+    }
+  };
+
+  // Sampled per frame *and* on every mutation: a frame is what the player sees,
+  // and a mutation is where the mount/unmount edges actually are. Under a
+  // blocked main thread neither fires, which is the whole problem — so the
+  // long-task list is recorded next to them to make that visible.
+  const frame = () => {
+    const sample = read();
+    timeline.samples.push(sample);
+    edges(sample);
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+
+  new MutationObserver(() => { edges(read()); }).observe(document, {
+    childList: true, subtree: true, attributes: true,
+  });
+
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        timeline.longTasks.push({ start: Math.round(entry.startTime), dur: Math.round(entry.duration) });
+      }
+    }).observe({ entryTypes: ['longtask'] });
+  } catch {}
+
+  window.addEventListener('pagehide', save);
+  setTimeout(save, 15000);
+})();
+`;
+
+/** Main-thread time spent inside long tasks while the boot screen was overdue a bar. */
+function busyAfterGate(timeline: Timeline, from: number, to: number): number {
+  const start = Math.max(from, GATE_MS);
+  if (to <= start) return 0;
+  let busy = 0;
+  for (const task of timeline.longTasks) {
+    const overlap = Math.min(to, task.start + task.dur) - Math.max(start, task.start);
+    if (overlap > 0) busy += overlap;
+  }
+  return Math.round(busy);
+}
+
+/**
+ * Judged on elapsed time, not on how many frames happened to get sampled.
+ *
+ * Counting sampled frames is the trap this whole ticket sits in. The main thread
+ * is blocked for most of a slow boot window, so `requestAnimationFrame` does not
+ * run — and a window with no samples in it scores zero missing frames and reads
+ * as a pass. That is exactly how a bar that was never in the DOM at all came
+ * back green. The mount/unmount edges come from a `MutationObserver` instead,
+ * which runs as a microtask of whichever task did the mutating and therefore
+ * cannot be starved into silence.
+ */
+function report(rate: number, repeat: number, timeline: Timeline): RunReport {
+  const at = (name: string): number | null => timeline.events.find((e) => e.name === name)?.t ?? null;
+  const bootFrom = at('boot-mount');
+  const bootTo = at('boot-unmount');
+  const barFrom = at('bar-in-dom');
+  const barTo = at('bar-out-of-dom');
+  const last = timeline.samples.at(-1)?.t ?? GATE_MS;
+
+  // A boot that ended before the threshold is owed nothing, and a bar there
+  // would be the defect rather than the fix.
+  const owedFrom = Math.max(GATE_MS, bootFrom ?? GATE_MS);
+  const owedTo = bootTo ?? last;
+  const owedMs = bootFrom === null ? 0 : Math.max(0, owedTo - owedFrom);
+
+  // The bar's own window, clipped to the window it was owed in.
+  const barWindowFrom = barFrom ?? Number.POSITIVE_INFINITY;
+  const barWindowTo = barTo ?? last;
+  const covered = Math.max(
+    0,
+    Math.min(owedTo, barWindowTo) - Math.max(owedFrom, barWindowFrom),
+  );
+  const missingDomMs = Math.round(Math.max(0, owedMs - covered));
+
+  // Visibility, where there are frames to judge it on. Measured from when the
+  // reveal can first have started — the threshold, or the mount on a load that
+  // was already past it — so a sample taken mid-fade is not a missing bar.
+  const owedSamples = timeline.samples.filter((s) => s.boot && s.t >= owedFrom + GRACE_MS);
+  const missingPaint = owedSamples.filter((s) => s.bar && s.opacity <= 0).length;
+
+  return {
+    rate,
+    repeat,
+    bootFrom,
+    bootTo,
+    barFrom,
+    owedMs,
+    missingDomMs,
+    samples: owedSamples.length,
+    missingPaint,
+    busyMsAfterGate: busyAfterGate(timeline, bootFrom ?? 0, owedTo),
+    verdict:
+      owedMs <= GRACE_MS ? 'n/a' : missingDomMs <= GRACE_MS && missingPaint === 0 ? 'pass' : 'fail',
+  };
+}
+
+async function measure(cdp: Cdp, rate: number, repeat: number): Promise<RunReport> {
+  // Unthrottled quiet page: clearing here rather than on the measured load keeps
+  // a previous run's save (and its offline card) out of the boot path.
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
+  await sleep(600);
+  await cdp.evaluate('localStorage.clear(); return true;');
+  await cdp.send('Network.clearBrowserCache');
+
+  // Installed for exactly one load and removed again. `?noboot=1` is dev-only,
+  // so on a production build the page we read the record back from boots the
+  // game too — and with the probe still installed it would file its own fast,
+  // unthrottled timeline over the measured one. (It did: every rate reported a
+  // ~90 ms boot window until this was fixed.)
+  const probe = await cdp.send<{ identifier: string }>('Page.addScriptToEvaluateOnNewDocument', {
+    source: PROBE,
+  });
+
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate });
+  await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
+  await sleep(Math.max(5_000, 1_000 * rate));
+
+  await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: probe.identifier });
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+
+  // Read from a fresh page, not from the measured one: the game owns the main
+  // thread by now and a `Runtime.evaluate` against it waits tens of seconds.
+  await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
+  await sleep(600);
+  const raw = await cdp.evaluate<string | null>(
+    "return localStorage.getItem('__clubBootTimeline');",
+  );
+  if (raw === null) throw new Error(`no timeline recorded at ${rate}x (did the bundle load?)`);
+
+  return report(rate, repeat, JSON.parse(raw) as Timeline);
+}
+
+function row(r: RunReport): string {
+  const window = r.bootFrom === null ? 'never' : `${r.bootFrom} → ${r.bootTo ?? 'still up'}`;
+  const bar = r.barFrom === null ? 'never' : `from ${r.barFrom}`;
+  return (
+    `  ${`${r.rate}x`.padEnd(5)}${String(r.repeat).padEnd(4)}` +
+    `${window.padEnd(18)}${bar.padEnd(13)}` +
+    `${`${r.owedMs} ms`.padStart(8)}${`${r.missingDomMs} ms`.padStart(10)}` +
+    `${`${r.missingPaint}/${r.samples}`.padStart(11)}${`${r.busyMsAfterGate} ms`.padStart(9)}  ${r.verdict}`
+  );
+}
+
+async function main(): Promise<void> {
+  if (RATES.length === 0) {
+    console.error('usage: node tools/boot-progress.ts <cpuRate...>   (e.g. 1 6 10 20)');
+    process.exit(2);
+  }
+
+  const targets = (await (await fetch(`${DEBUG_URL}/json/list`)).json()) as {
+    type: string;
+    webSocketDebuggerUrl: string;
+  }[];
+  const page = targets.find((t) => t.type === 'page');
+  if (page === undefined) throw new Error('no page target; is Chrome running with --remote-debugging-port?');
+
+  const cdp = await Cdp.connect(page.webSocketDebuggerUrl);
+  await cdp.send('Page.enable');
+  await cdp.send('Runtime.enable');
+  await cdp.send('Network.enable');
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+  });
+
+  console.log('');
+  console.log('Club Empire — boot progress bar against the 1 s gate');
+  console.log(`  url     ${BASE_URL}`);
+  console.log(`  gate    ${GATE_MS} ms from the navigation time origin (+${GRACE_MS} ms frame grace)`);
+  console.log('');
+  console.log(
+    `  ${'cpu'.padEnd(5)}${'rep'.padEnd(4)}${'.boot window'.padEnd(18)}${'.boot__progress'.padEnd(13)}` +
+      `${'owed'.padStart(8)}${'missing'.padStart(10)}${'dark/seen'.padStart(11)}${'busy'.padStart(9)}  verdict`,
+  );
+  console.log(`  ${'-'.repeat(86)}`);
+
+  const reports: RunReport[] = [];
+  for (const rate of RATES) {
+    for (let repeat = 1; repeat <= REPEATS; repeat += 1) {
+      const result = await measure(cdp, rate, repeat);
+      reports.push(result);
+      console.log(row(result));
+    }
+  }
+
+  const failures = reports.filter((r) => r.verdict === 'fail');
+  const overdue = reports.filter((r) => r.verdict !== 'n/a');
+  console.log(`  ${'-'.repeat(86)}`);
+  console.log('');
+  console.log(
+    `  ${overdue.length} of ${reports.length} loads were still booting at the threshold; ${failures.length} failed.`,
+  );
+  console.log('  owed/missing are ms of the boot screen past the threshold, not frame counts:');
+  console.log('  a blocked main thread samples no frames, and a window with no samples in it');
+  console.log('  scores zero missing frames whatever is on screen. `dark/seen` is the frames');
+  console.log('  that were sampled, and how many of them had the bar present but transparent.');
+  console.log('  `busy` is main-thread time inside long tasks after the threshold — the reason');
+  console.log('  a timer-gated bar never appeared. A CSS-gated one does not need the thread.');
+  console.log('');
+
+  if (process.env.CLUB_BOOT_JSON !== undefined && process.env.CLUB_BOOT_JSON !== '') {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(process.env.CLUB_BOOT_JSON, `${JSON.stringify(reports, null, 2)}\n`, 'utf8');
+    console.log(`  wrote ${process.env.CLUB_BOOT_JSON}`);
+    console.log('');
+  }
+
+  cdp.close();
+  if (failures.length > 0) process.exit(1);
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});

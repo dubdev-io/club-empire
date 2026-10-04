@@ -53,6 +53,7 @@ node tools/autobuy.ts --tap   # ...with a player collecting every bubble
 
 npm run shots            # all ten states at 390x844 and 1440x900
 npm run measure:frames   # per-system frame time at the §11 entity ceiling
+npm run measure:boot -- 1 6 10 20   # the boot progress bar against the 1 s gate
 ```
 
 `sim:economy` and `sim:autobuy` read the same table from `src/config/pacing.ts`.
@@ -60,6 +61,15 @@ The first runs a closed-form model, the second runs the real `ClubState` through
 the real purchase functions — so a divergence between the signed-off model and
 the shipping game shows up as two different sets of numbers rather than as two
 tools that both pass.
+
+`measure:boot` is the DUB-21 regression instrument: it drives a cold load at a
+range of CPU throttles and reports, per frame, whether `.boot__progress` was in
+the DOM **and** not fully transparent while the boot screen was up past the 1 s
+threshold. It wants a `preview` server rather than `dev` (`CLUB_URL` points it
+anywhere), because the thing it measures is bundle-parse and texture-generation
+timing. Rate alone does not decide the outcome — whether the boot screen mounted
+before or after the threshold does — so run a few repeats:
+`CLUB_BOOT_REPEATS=3 npm run measure:boot -- 10`.
 
 `shots` and `measure:frames` need a dev server and a headless Chrome with remote
 debugging:
@@ -128,6 +138,7 @@ tools/
   autobuy.ts            the shipping game vs the §4.4 table (criterion 1)
   screenshots.ts        all ten states, both viewports, over CDP
   frametime.ts          per-system frame time at the §11 ceiling (criterion 8)
+  boot-progress.ts      the boot progress bar against the 1 s gate (DUB-21)
 ```
 
 ## Where the balance numbers live
