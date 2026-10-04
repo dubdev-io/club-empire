@@ -61,6 +61,18 @@
  * the things it owed and forgot the third, so there is now exactly one place
  * that can be forgotten and it is covered by a test.
  *
+ * **7. Strictness that costs an attempt is not free either (DUB-14).** Rule 5
+ * voided a run on *any* hidden break, which is right for a phone that locked
+ * its screen and wrong for a one-second notification sheet — and the owner had
+ * already lost two attempts to measurement mechanics rather than to the build.
+ * So a window now absorbs up to `HIDDEN_TOLERANCE_MS` of interruption, and
+ * absorbing it means three things together, not one: the deadline moves out so
+ * the run still collects a full minute of real frames, the absorbed wall clock
+ * comes out of the duty-cycle denominator (`dutyCycle`) so the tolerance cannot
+ * buy a softer `busy_pct`, and `hidden_breaks`/`hidden_s` print on every report
+ * whether it was tolerated or not. A tolerance a reader cannot see is a rule 3
+ * failure wearing a rule 5 hat.
+ *
  * Field names are a contract: QA reads them off this overlay for the DUB-6 C1
  * frame-budget numbers. They are listed in the README and must not be renamed
  * without saying so on DUB-6. New fields may be added; existing ones keep both
@@ -99,6 +111,30 @@ const MEASURE_MS = 60_000;
 
 /** The same length in whole seconds, for the `valid` reason text. */
 const MEASURE_S = MEASURE_MS / 1000;
+
+/**
+ * Total hidden time a window may absorb before it stops being one minute.
+ *
+ * DUB-10 voided on the *count* of hidden breaks, and that rule was right about
+ * the failure it was written for — a phone that locks its screen halfway
+ * through, where the two halves are thermally different minutes that must not
+ * be averaged. It was too strict for everything else. A notification sheet, a
+ * glance at the clock, an incoming call banner, one accidental swipe: each is
+ * about a second, and each cost a full 60 s re-run. Two owner attempts were
+ * already lost to measurement mechanics rather than to the build.
+ *
+ * So the window now absorbs small interruptions instead of voiding on them, and
+ * it absorbs them in the only way that keeps the report honest: the deadline
+ * moves out by the hidden period, so the run still collects a full minute of
+ * real frames, and the absorbed time comes out of the duty-cycle denominator
+ * (see `dutyCycle`) so `busy_pct` is still work per second of *measured* wall
+ * clock. A locked screen still voids, because three seconds is far short of one.
+ *
+ * Absorbing is never silent: `hidden_breaks` and `hidden_s` stay on every
+ * report, tolerated or not, so a reader can see that a run took 2.4 s of
+ * interruption and decide for themselves whether to believe it.
+ */
+const HIDDEN_TOLERANCE_MS = 3_000;
 
 /**
  * Frame-time samples kept per window.
@@ -157,9 +193,21 @@ export interface MeasurementWindow {
   readonly frozen: boolean;
   /** Wall clock since the window opened. */
   readonly elapsedMs: number;
-  /** Hidden periods seen while sampling. */
+  /**
+   * Hidden periods seen while sampling.
+   *
+   * Reported but no longer decisive: DUB-14 moved the verdict onto the total
+   * below, because four glances at the clock are not the failure this was
+   * written to catch. Kept on the window — and on the report — so a reader can
+   * tell one 2 s interruption from four 500 ms ones, which is a different
+   * story about the run even when both are tolerated.
+   */
   readonly hiddenBreaks: number;
-  /** Total time the page spent hidden during the window. */
+  /**
+   * Total time the page spent hidden during the window.
+   *
+   * The number `valid` is decided on, against `HIDDEN_TOLERANCE_MS`.
+   */
   readonly hiddenMs: number;
   /** `stress=1` was on the URL. */
   readonly stress: boolean;
@@ -197,7 +245,11 @@ export function validityVerdict(measured: MeasurementWindow): string {
       : `no — still running, ${seconds} s of ${MEASURE_S} s`;
   }
 
-  if (measured.hiddenBreaks > 0) {
+  // On the total, not the count. One break of 8.8 s voids; four breaks of
+  // 600 ms do not, because the deadline moved out by each of them and the
+  // denominator lost them, so what is left is still a full minute of frames
+  // taken under one thermal condition. See `HIDDEN_TOLERANCE_MS`.
+  if (measured.hiddenMs > HIDDEN_TOLERANCE_MS) {
     return `no — window was hidden for ${(measured.hiddenMs / 1000).toFixed(1)} s`;
   }
 
@@ -285,6 +337,57 @@ export function createWindowFreeze(readFrames: () => FrameReport): WindowFreeze 
   };
 }
 
+/** The three `busy_*` rows, after absorbed hidden time is taken back out. */
+export interface DutyCycle {
+  /** `busy_pct`. */
+  readonly busyPercent: number;
+  /** `busy_ms_per_s`. */
+  readonly busyMsPerSecond: number;
+  /** `busy_window_s`. */
+  readonly windowMs: number;
+}
+
+/**
+ * The duty cycle over *measured* wall clock, with absorbed hidden time removed.
+ *
+ * `FrameProbe` divides main-thread busy ms by `windowEndedAt - windowStartedAt`,
+ * and once a window is allowed to absorb a hidden period (see
+ * `HIDDEN_TOLERANCE_MS`) that span contains wall clock with no frames in it.
+ * Leaving it in the denominator makes `busy_pct` read low by exactly the hidden
+ * fraction — which is the same leniency DUB-12 just removed from these three
+ * fields, arriving by a different route: there the dilution was idle panel time
+ * after the freeze, here it would be idle hidden time inside the window, and in
+ * both cases the figure DUB-6 gates on gets better the more the measurement was
+ * interrupted. A tolerance that bought itself a softer gate would not be worth
+ * having.
+ *
+ * `busy_window_s` prints `windowMs` for the same reason it is on the report at
+ * all: it is the denominator, and the README tells a reader to cross-check it
+ * against `elapsed_s`. `elapsed_s` is wall clock *including* the absorbed time,
+ * so on a tolerated run the two now differ by `hidden_s` rather than by a
+ * frame — which is a readable, three-field cross-check rather than a mismatch
+ * nobody can account for.
+ *
+ * Clamped rather than trusted: `hiddenMs` is counted from `visibilitychange`
+ * and `wallMs` from the game's own frames, so a hidden period that straddles
+ * the last rendered frame could in principle exceed the span. A negative
+ * denominator would print a nonsense duty cycle, and zero is the honest answer
+ * to "work per second of a window with no measured seconds in it".
+ *
+ * Exported and pure for the same reason as `validityVerdict` and
+ * `createWindowFreeze`: `vitest` runs on the node environment, and arithmetic
+ * that silently flatters the gating figure is not something to check by eye on
+ * a phone.
+ */
+export function dutyCycle(frames: FrameReport, hiddenMs: number): DutyCycle {
+  const windowMs = Math.max(0, frames.wallMs - Math.max(0, hiddenMs));
+  if (windowMs <= 0) {
+    return { busyPercent: 0, busyMsPerSecond: 0, windowMs: 0 };
+  }
+  const busyMsPerSecond = (frames.busyMs / windowMs) * 1000;
+  return { busyPercent: busyMsPerSecond / 10, busyMsPerSecond, windowMs };
+}
+
 /**
  * What the screen wake lock did, as reported by `wake_lock`.
  *
@@ -292,9 +395,10 @@ export function createWindowFreeze(readFrames: () => FrameReport): WindowFreeze 
  * word for `refused`: the browser drops a screen lock by itself when the
  * document becomes hidden, and without observing the sentinel's `release` event
  * the field went on claiming `held` after the OS had taken it away. The state
- * only ever means *the browser* released it — see `releaseWakeLock`, which
- * detaches the sentinel before releasing so the overlay's own release at the end
- * of a window does not overwrite the `held` that was true throughout it.
+ * only ever means *the browser* released it — see `createWakeLockHolder`'s
+ * `release`, which detaches the sentinel before releasing so the overlay's own
+ * release at the end of a window does not overwrite the `held` that was true
+ * throughout it.
  *
  * There is deliberately no fourth state for "not requested yet". Before a
  * measurement is armed the row is simply absent (see `buildReport`), because
@@ -302,7 +406,129 @@ export function createWindowFreeze(readFrames: () => FrameReport): WindowFreeze 
  * and answering it wrongly, with "the API is not here" on every browser that
  * has it.
  */
-type WakeLockState = 'held' | 'refused' | 'released' | 'unavailable';
+export type WakeLockState = 'held' | 'refused' | 'released' | 'unavailable';
+
+/**
+ * The screen lock and the `wake_lock` row, with one owner.
+ *
+ * Extracted from `mountDebugOverlay` under DUB-14 because it had two faults
+ * with one cause, and the cause was that an async result was trusted without
+ * asking whether anyone still wanted it.
+ *
+ * `request` used to call `release` first, but that only ever released a
+ * sentinel that had *already resolved*. Tap "Start", then tap it again before
+ * the first `request('screen')` settles: both promises resolve, the second
+ * assignment overwrites the stored sentinel, and the first is never released.
+ * The screen then stays awake past the end of the window and `wake_lock`
+ * reports a lock that is not this window's.
+ *
+ * Worse, and squarely DUB-12's own argument: the fulfilment handler checked
+ * that the overlay was still alive but not that the window still wanted a
+ * lock. A request settling *after* "Copy report" set the field to `held` on an
+ * already-frozen panel, and a second copy printed it. DUB-12 removed exactly
+ * that class of untruth from seven fields; it survived in the eighth.
+ *
+ * A generation counter captured before the request closes both. Every
+ * `request` and every `release` moves the generation on, and a settled promise
+ * whose generation has moved releases its sentinel and writes nothing — so a
+ * superseded request cannot leak a lock and cannot speak for a window that has
+ * ended. It sits *under* the `release` listener DUB-12 added rather than
+ * replacing it: the listener answers "did the browser take the lock back", the
+ * generation answers "is this result still ours", and those are different
+ * questions.
+ *
+ * The detach-before-release ordering in `release` is DUB-12's and stays. The
+ * overlay's own release at the end of a window must leave the field reading
+ * `held`, because that is what was true throughout the window; only a release
+ * nobody here asked for becomes `released`.
+ *
+ * `readWakeLock` is injected for the usual reason: `vitest` runs on the node
+ * environment, there is no `navigator.wakeLock` there, and a race between two
+ * taps is the last thing anybody should be verifying by hand on a phone.
+ */
+export interface WakeLockHolder {
+  /** The `wake_lock` value; `null` until a lock has actually been asked for. */
+  readonly state: WakeLockState | null;
+  /** Ask for a screen lock, abandoning any earlier request or sentinel. */
+  request(): void;
+  /** Give the lock up, and abandon any request still in flight. */
+  release(): void;
+}
+
+export function createWakeLockHolder(readWakeLock: () => WakeLock | undefined): WakeLockHolder {
+  let state: WakeLockState | null = null;
+  let held: WakeLockSentinel | null = null;
+  /**
+   * Bumped by every `request` and every `release`. A promise that settles on a
+   * stale generation is a result nobody is waiting for any more.
+   */
+  let generation = 0;
+
+  function release(): void {
+    generation += 1;
+    const sentinel = held;
+    // Detached first, so the `release` listener below can tell this release
+    // apart from one the browser performed on its own.
+    held = null;
+    if (sentinel !== null) void sentinel.release();
+  }
+
+  function request(): void {
+    release();
+    const mine = (generation += 1);
+
+    // Typed as non-optional in lib.dom, genuinely absent in some engines —
+    // the same situation as `performance.memory`, handled the same way.
+    const wakeLock = readWakeLock();
+    if (wakeLock === undefined || typeof wakeLock.request !== 'function') {
+      state = 'unavailable';
+      return;
+    }
+
+    // Pessimistic until the promise resolves: the field must never claim a
+    // lock is held while the request is still in flight. The panel redraws at
+    // 5 Hz, so a granted lock shows up within 200 ms.
+    state = 'refused';
+    wakeLock.request('screen').then(
+      (sentinel) => {
+        if (generation !== mine) {
+          // Superseded or already released. Release what we were handed —
+          // dropping the reference instead is the leak this exists to close —
+          // and leave the field to whoever owns the current generation.
+          void sentinel.release();
+          return;
+        }
+        held = sentinel;
+        state = 'held';
+        // The browser releases a screen lock by itself when the document
+        // becomes hidden, and says so only through this event. Without it the
+        // field goes on reading `held` for the rest of the window while the
+        // screen is free to sleep — a mitigation reporting success after it
+        // stopped mitigating, which is worse than reporting nothing.
+        sentinel.addEventListener('release', () => {
+          if (held !== sentinel) return;
+          held = null;
+          state = 'released';
+        });
+      },
+      () => {
+        // A rejection on a stale generation is just as much not ours as a
+        // fulfilment is: overwriting the current window's `held` with the
+        // previous window's `refused` would be the same untruth mirrored.
+        if (generation !== mine) return;
+        state = 'refused';
+      },
+    );
+  }
+
+  return {
+    get state(): WakeLockState | null {
+      return state;
+    },
+    request,
+    release,
+  };
+}
 
 export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo): DebugOverlay {
   const debug = runtime.debug;
@@ -359,16 +585,19 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   let brokeQueues = 0;
 
   /**
-   * Null until "Start 60 s measurement" asks for a lock, and the row is left
-   * out of the report while it is null.
+   * The screen lock and the `wake_lock` row.
    *
-   * Nothing has been requested before then, so there is no outcome to report;
-   * the old initial value of `'unavailable'` said "this browser does not have
-   * the API" on every browser that does, which is the one thing this panel is
-   * built not to do.
+   * `holder.state` is null until "Start 60 s measurement" asks for a lock, and
+   * the row is left out of the report while it is (see `buildReport`). Nothing
+   * has been requested before then, so there is no outcome to report; the old
+   * initial value of `'unavailable'` said "this browser does not have the API"
+   * on every browser that does, which is the one thing this panel is built not
+   * to do.
+   *
+   * Read lazily rather than captured, because feature detection has to happen
+   * at the tap: iOS only honours a wake-lock request inside a user gesture.
    */
-  let wakeLockState: WakeLockState | null = null;
-  let wakeLockSentinel: WakeLockSentinel | null = null;
+  const wakeLock = createWakeLockHolder(() => navigator.wakeLock);
 
   const drawCalls = installDrawCallCounter(debug.renderer());
 
@@ -445,71 +674,6 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
   document.body.appendChild(root);
 
   /**
-   * Keep the screen on for the length of a measurement.
-   *
-   * This is a mitigation, not a fix. `hidden_breaks` is the fix — it catches
-   * the failure after the fact and refuses to average it in. This only makes
-   * the failure rarer, by removing the most likely cause: DUB-8's protocol
-   * tells the owner to put the phone down for a minute, and a phone left alone
-   * locks its screen. Feature-detected because Safari only grew the API
-   * recently and a WebView may not have it at all, and failure is quiet
-   * because a refused lock is a legal outcome, not an error.
-   */
-  function requestWakeLock(): void {
-    releaseWakeLock();
-
-    // Typed as non-optional in lib.dom, genuinely absent in some engines —
-    // the same situation as `performance.memory`, handled the same way.
-    const wakeLock: WakeLock | undefined = navigator.wakeLock;
-    if (wakeLock === undefined || typeof wakeLock.request !== 'function') {
-      wakeLockState = 'unavailable';
-      return;
-    }
-
-    // Pessimistic until the promise resolves: the field must never claim a
-    // lock is held while the request is still in flight. The panel redraws at
-    // 5 Hz, so a granted lock shows up within 200 ms.
-    wakeLockState = 'refused';
-    wakeLock.request('screen').then(
-      (sentinel) => {
-        if (!alive) {
-          void sentinel.release();
-          return;
-        }
-        wakeLockSentinel = sentinel;
-        wakeLockState = 'held';
-        // The browser releases a screen lock by itself when the document
-        // becomes hidden, and says so only through this event. Without it the
-        // field goes on reading `held` for the rest of the window while the
-        // screen is free to sleep — a mitigation reporting success after it
-        // stopped mitigating, which is worse than reporting nothing.
-        //
-        // The guard is what keeps `held` true for a window that completed
-        // normally: `releaseWakeLock` clears `wakeLockSentinel` *before* it
-        // releases, so a release the overlay asked for no longer matches here
-        // and leaves the field alone. Only a release nobody here requested
-        // reaches the assignment.
-        sentinel.addEventListener('release', () => {
-          if (wakeLockSentinel !== sentinel) return;
-          wakeLockSentinel = null;
-          wakeLockState = 'released';
-        });
-      },
-      () => {
-        wakeLockState = 'refused';
-      },
-    );
-  }
-
-  function releaseWakeLock(): void {
-    const sentinel = wakeLockSentinel;
-    // Detached first, so the `release` listener above can tell this release
-    // apart from one the browser performed on its own.
-    wakeLockSentinel = null;
-    if (sentinel !== null) void sentinel.release();
-  }
-
-  /**
    * The page went away, or came back.
    *
    * Counted on the way out rather than on the way back, so a window that is
@@ -534,9 +698,16 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     }
 
     if (hiddenAt !== 0) {
-      hiddenMs += now - hiddenAt;
+      const away = now - hiddenAt;
+      hiddenMs += away;
       hiddenAt = 0;
       discardNextFrame = true;
+      // Push the deadline out by what we were away for, so a tolerated
+      // interruption costs the run its wall clock but not its frames: the
+      // window still closes on a full 60 s of *visible* time, which is the
+      // thing `MEASURE_MS` is 60 s for. Without this, absorbing a 2 s
+      // notification sheet would quietly turn the C1 reading into a 58 s one.
+      if (measureUntil !== null) measureUntil += away;
     }
   }
 
@@ -600,6 +771,10 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     // stops, so a re-read here was a different measurement with the same
     // heading on it.
     const frames = freeze.frames();
+    // Absorbed hidden time is wall clock with no frames in it, so it comes out
+    // of the duty-cycle denominator — otherwise a tolerated interruption would
+    // walk `busy_pct` down by exactly the hidden fraction. See `dutyCycle`.
+    const busy = dutyCycle(frames, hiddenMsAt(now));
     const domParticles = confettiPieces();
 
     const n = sampleCount;
@@ -647,9 +822,9 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       // game's own probe, not from this module's rAF hook: the hook can see
       // how long a frame lasted but not how much of it the game spent
       // working, and the gap between those two is the entire point.
-      ['busy_pct', fixed(frames.busyPercent, 1)],
-      ['busy_ms_per_s', fixed(frames.busyMsPerSecond, 1)],
-      ['busy_window_s', fixed(frames.wallMs / 1000, 1)],
+      ['busy_pct', fixed(busy.busyPercent, 1)],
+      ['busy_ms_per_s', fixed(busy.busyMsPerSecond, 1)],
+      ['busy_window_s', fixed(busy.windowMs / 1000, 1)],
       ['draw_calls', drawCalls === null ? 'n/a' : String(drawCalls.lastFrame)],
       ['guests_rendered', String(counts.guests)],
       ['bartenders_rendered', String(counts.bartenders)],
@@ -675,13 +850,15 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       ['elapsed_s', fixed(elapsedMs / 1000, 1)],
       // Hidden periods are the reason the frame stats can be trusted at all:
       // the frame spanning each one is discarded rather than averaged, so
-      // these two fields are what is left to say it happened. `hidden_breaks`
-      // is also the condition that drives `valid` to `no`.
+      // these two fields are what is left to say it happened. Both print on
+      // every report whether the run was voided or tolerated — a tolerance
+      // nobody can see is a tolerance nobody can argue with, and `hidden_s` is
+      // the number `valid` is now decided on (see `HIDDEN_TOLERANCE_MS`).
       ['hidden_breaks', String(hiddenBreaks)],
       ['hidden_s', fixed(hiddenMsAt(now) / 1000, 1)],
       // Null until a lock has actually been asked for, which omits the row —
-      // see `wakeLockState`.
-      ['wake_lock', wakeLockState],
+      // see `wakeLock`.
+      ['wake_lock', wakeLock.state],
       ['window_frames', String(n + dropped)],
       ['sim_ms_p95', fixed(frames.phases.sim.p95Ms, 2)],
       ['scene_ms_p95', fixed(frames.phases.scene.p95Ms, 2)],
@@ -822,9 +999,15 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     measureUntil = now + MEASURE_MS;
     status = 'measuring 60 s — leave the phone alone';
     applyFrozenClass();
+    // Keeping the screen on is a mitigation, not a check. `hidden_s` is the
+    // check — it catches the failure after the fact and refuses to average a
+    // locked screen in. This only makes the failure rarer, by removing the
+    // most likely cause: DUB-8's protocol tells the owner to put the phone
+    // down for a minute, and a phone left alone locks its screen.
+    //
     // Inside the tap, so iOS treats it as user-initiated. A rejection is
     // reported through `wake_lock` and changes nothing else.
-    requestWakeLock();
+    wakeLock.request();
     debug.counts(counts);
     noteScene();
     paint(now);
@@ -851,7 +1034,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
     freeze.freeze(now);
     const at = freeze.instant(now);
     measureUntil = null;
-    releaseWakeLock();
+    wakeLock.release();
     applyFrozenClass();
     paint(at);
 
@@ -963,9 +1146,14 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
         freeze.freeze(deadline);
         completed = true;
         measureUntil = null;
-        releaseWakeLock();
+        wakeLock.release();
+        // The status line follows the verdict, so it has to follow the same
+        // rule: a run that absorbed 1.2 s of notification sheet is complete and
+        // valid, and telling the owner to do it again would undo the whole
+        // point of the tolerance. `hidden_s` on the report still shows what was
+        // absorbed either way.
         status =
-          hiddenBreaks > 0
+          hiddenMsAt(deadline) > HIDDEN_TOLERANCE_MS
             ? 'complete but INVALID — the page was hidden; read the valid row and run it again'
             : 'measurement complete — frozen, tap “Copy report”';
         applyFrozenClass();
@@ -996,7 +1184,7 @@ export function mountDebugOverlay(runtime: GameRuntime, info: DebugOverlayInfo):
       alive = false;
       cancelAnimationFrame(rafHandle);
       document.removeEventListener('visibilitychange', onVisibilityChange);
-      releaseWakeLock();
+      wakeLock.release();
       drawCalls?.restore();
       root.remove();
       style.remove();

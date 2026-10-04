@@ -1,13 +1,16 @@
 /**
- * The two parts of the overlay a test can reach: the `valid` verdict and the
- * freeze latch.
+ * The four parts of the overlay a test can reach: the `valid` verdict, the
+ * freeze latch, the duty-cycle correction and the wake-lock holder.
  *
  * DUB-10 exists because a report that was wrong in two separate ways still
  * looked complete, and the only thing standing between that happening again
  * and it not is the rule table below. DUB-12 is the same failure one layer in:
  * the panel said `FROZEN`, and three of its fields carried on moving anyway.
- * Both are "the report says something untrue about itself", and both are now
- * rules in code rather than things somebody has to notice on a phone.
+ * DUB-14 is both at once — a tolerance that would have made `busy_pct` read
+ * low, and a wake lock that could leak a sentinel and then describe a window
+ * that had already ended. All of them are "the report says something untrue
+ * about itself", and all of them are now rules in code rather than things
+ * somebody has to notice on a phone.
  *
  * The rest of `overlay.ts` needs a DOM, a WebGL context and a frame clock —
  * `vitest` runs on the node environment, so those parts are verified by running
@@ -25,7 +28,9 @@ import {
   C1_BARTENDERS,
   C1_GUESTS,
   C1_QUEUES,
+  createWakeLockHolder,
   createWindowFreeze,
+  dutyCycle,
   validityVerdict,
   type MeasurementWindow,
 } from './overlay.ts';
@@ -98,6 +103,72 @@ describe('validityVerdict', () => {
   it('refuses a window the page was hidden during, and says for how long', () => {
     expect(verdict({ hiddenBreaks: 1, hiddenMs: 8_750 })).toBe(
       'no — window was hidden for 8.8 s',
+    );
+  });
+
+  // --- the hidden tolerance (DUB-14) --------------------------------------
+  //
+  // DUB-10's rule was `hiddenBreaks > 0`, which voided a full minute of good
+  // frames because a notification sheet appeared for a second. The owner had
+  // lost two attempts to measurement mechanics by then, so the rule now runs
+  // on the total against `HIDDEN_TOLERANCE_MS` (3 s). The boundary cases are
+  // asserted rather than described because the constant lives in `overlay.ts`
+  // and is not exported — these tests are what pins it.
+  it('tolerates a one-second interruption, and still reports it', () => {
+    // The case the tolerance exists for: one glance at the clock. The deadline
+    // moved out by the second it was away (see `onVisibilityChange`), so this
+    // is a full minute of real frames with a second of wall clock absorbed.
+    expect(verdict({ hiddenBreaks: 1, hiddenMs: 1_000 })).toBe('yes');
+    // `valid yes` is not permission to stop printing what happened: both
+    // `hidden_breaks` and `hidden_s` are unconditional rows in `buildReport`,
+    // so this run reports `hidden_breaks 1` / `hidden_s 1.0` and a reader can
+    // judge it. That formatting needs a DOM and is verified in the browser;
+    // what is checked here is that a tolerated run is *reported*, by the
+    // verdict not being allowed to launder it into an unremarkable `yes`.
+    expect(verdict({ hiddenBreaks: 1, hiddenMs: 1_000 })).not.toContain('hidden');
+  });
+
+  it('tolerates several small interruptions that stay under the budget', () => {
+    // Four accidental swipes of 600 ms. The old rule voided on the first.
+    expect(verdict({ hiddenBreaks: 4, hiddenMs: 2_400 })).toBe('yes');
+  });
+
+  it('voids on the total, not the count', () => {
+    // 3.5 s in one break: over budget, so the run is void — and the reason
+    // still quotes the total, which is the number the rule was decided on.
+    expect(verdict({ hiddenBreaks: 1, hiddenMs: 3_500 })).toBe(
+      'no — window was hidden for 3.5 s',
+    );
+    // The same 3.5 s split three ways is just as void. The count is reported,
+    // never decisive.
+    expect(verdict({ hiddenBreaks: 3, hiddenMs: 3_500 })).toBe(
+      'no — window was hidden for 3.5 s',
+    );
+  });
+
+  it('holds the tolerance exactly at the budget', () => {
+    // 3000 ms is tolerated and 3001 is not. Spelled out because `>` versus
+    // `>=` here is the difference between a rule and a rule nobody can predict.
+    expect(verdict({ hiddenBreaks: 1, hiddenMs: 3_000 })).toBe('yes');
+    expect(verdict({ hiddenBreaks: 1, hiddenMs: 3_001 })).toBe(
+      'no — window was hidden for 3.0 s',
+    );
+  });
+
+  it('still voids a locked screen', () => {
+    // The failure DUB-10 was written for, and the one the tolerance must not
+    // reach: a minute split across a screen lock is two different thermal
+    // conditions averaged together, which is not a measurement of either.
+    expect(verdict({ hiddenBreaks: 1, hiddenMs: 30_000 })).toBe(
+      'no — window was hidden for 30.0 s',
+    );
+  });
+
+  it('does not let a tolerated interruption rescue an unfinished window', () => {
+    // Precedence is unchanged: hidden time is checked after completion, so
+    // absorbing a second does not make a window that was copied at 12 s valid.
+    expect(verdict({ completed: false, elapsedMs: 12_000, hiddenMs: 1_000 })).toBe(
+      'no — copied at 12 s of 60 s',
     );
   });
 
@@ -263,5 +334,286 @@ describe('createWindowFreeze', () => {
     freeze.frames();
 
     expect(reads).toBe(1);
+  });
+});
+
+describe('dutyCycle', () => {
+  it('leaves an uninterrupted window exactly as the probe measured it', () => {
+    // 9 s of work in 60 s of wall clock: 15 %. With nothing hidden the
+    // correction has to be the identity, or every clean C1 reading taken
+    // before DUB-14 stops comparing to one taken after it.
+    const busy = dutyCycle(report(9_000, 60_000), 0);
+    expect(busy.busyPercent).toBeCloseTo(15, 10);
+    expect(busy.busyMsPerSecond).toBeCloseTo(150, 10);
+    expect(busy.windowMs).toBe(60_000);
+  });
+
+  it('takes absorbed hidden time out of the denominator', () => {
+    // The same 9 s of work, but 2 s of the window was a notification sheet
+    // with no frames in it. The duty cycle is work per second of *measured*
+    // wall clock, so the denominator is 58 s and the figure goes **up**.
+    const busy = dutyCycle(report(9_000, 60_000), 2_000);
+    expect(busy.windowMs).toBe(58_000);
+    expect(busy.busyPercent).toBeCloseTo((9_000 / 58_000) * 100, 10);
+    // Up, not down. This is the whole reason the correction exists: leaving
+    // the hidden 2 s in reads 15.0 % against a true 15.5 %, and a tolerance
+    // that quietly bought a 3 % softer gate would be DUB-12's dilution bug
+    // arriving by a different route.
+    expect(busy.busyPercent).toBeGreaterThan(report(9_000, 60_000).busyPercent);
+  });
+
+  it('keeps busy_pct and busy_ms_per_s the same figure', () => {
+    // `busy_pct` is `busy_ms_per_s / 10` by definition, and the README tells a
+    // reader to do arithmetic with the pair. They must not drift apart here.
+    const busy = dutyCycle(report(7_431, 60_000), 1_250);
+    expect(busy.busyPercent).toBeCloseTo(busy.busyMsPerSecond / 10, 10);
+  });
+
+  it('reports the corrected window, because that is the denominator', () => {
+    // `busy_window_s` is on the report so `busy_pct` can be checked by hand.
+    // It therefore has to be the number actually divided by — on a tolerated
+    // run it falls short of `elapsed_s` by `hidden_s`, which is a cross-check
+    // a reader can complete rather than a mismatch nobody can account for.
+    const busy = dutyCycle(report(1_000, 60_000), 1_400);
+    expect(busy.windowMs).toBe(58_600);
+    // Completable by hand off the printed rows: busy_ms_per_s * busy_window_s
+    // is the work, to the precision the report prints them at.
+    expect((busy.busyMsPerSecond * busy.windowMs) / 1000).toBeCloseTo(1_000, 6);
+  });
+
+  it('refuses to invent a duty cycle for a window with no measured time', () => {
+    // Hidden time is counted from `visibilitychange` and `wallMs` from the
+    // game's own frames, so in principle the two can disagree at the edge of a
+    // window. Zero is the honest answer to "work per second of no seconds"; a
+    // negative denominator would print a plausible-looking nonsense figure,
+    // which is the one thing this overlay does not do.
+    expect(dutyCycle(report(1_000, 60_000), 60_000)).toEqual({
+      busyPercent: 0,
+      busyMsPerSecond: 0,
+      windowMs: 0,
+    });
+    expect(dutyCycle(report(1_000, 60_000), 90_000)).toEqual({
+      busyPercent: 0,
+      busyMsPerSecond: 0,
+      windowMs: 0,
+    });
+    expect(dutyCycle(report(0, 0), 0)).toEqual({
+      busyPercent: 0,
+      busyMsPerSecond: 0,
+      windowMs: 0,
+    });
+  });
+});
+
+/**
+ * A wake lock that hands out sentinels on demand, so a test can decide *when*
+ * each request settles.
+ *
+ * That control is the entire point: both DUB-14 faults are about a promise
+ * resolving at a moment nobody expected it to, and a fake that resolved
+ * immediately could not express either of them.
+ */
+function fakeWakeLock(): {
+  readonly api: WakeLock;
+  /** Settle the nth outstanding request, and return the sentinel it produced. */
+  grant(index: number): FakeSentinel;
+  /** Reject the nth outstanding request. */
+  refuse(index: number): void;
+  readonly requests: number;
+} {
+  const pending: { grant: (s: FakeSentinel) => void; refuse: () => void }[] = [];
+  // `WakeLock` is satisfied structurally — it is the one-method interface
+  // `request(type?)`. `WakeLockSentinel` is not: it is a full `EventTarget`
+  // with `released`, `type` and `onrelease`, and `FakeSentinel` deliberately
+  // implements only the two members the holder touches, so that a holder which
+  // started relying on a third member would fail to compile here rather than
+  // pass against a stub that quietly grew to match it.
+  const api: WakeLock = {
+    request: () =>
+      new Promise<WakeLockSentinel>((resolve, reject) => {
+        pending.push({
+          grant: (sentinel) => resolve(sentinel as unknown as WakeLockSentinel),
+          refuse: () => reject(new Error('denied')),
+        });
+      }),
+  };
+
+  return {
+    api,
+    grant(index) {
+      const sentinel = new FakeSentinel();
+      pending[index]!.grant(sentinel);
+      return sentinel;
+    },
+    refuse(index) {
+      pending[index]!.refuse();
+    },
+    get requests() {
+      return pending.length;
+    },
+  };
+}
+
+/** Just enough `WakeLockSentinel` to see whether it was released. */
+class FakeSentinel {
+  released = 0;
+  private listeners: (() => void)[] = [];
+
+  release(): Promise<void> {
+    this.released += 1;
+    return Promise.resolve();
+  }
+
+  addEventListener(_type: string, listener: () => void): void {
+    this.listeners.push(listener);
+  }
+
+  /** What the browser does when the document becomes hidden. */
+  autoRelease(): void {
+    for (const listener of this.listeners) listener();
+  }
+}
+
+/** Let every already-settled promise callback run. */
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe('createWakeLockHolder', () => {
+  it('says nothing until a lock has been asked for', () => {
+    // The row is absent, not `unavailable`: before "Start" there is no outcome
+    // to report, and `unavailable` there claimed the API was missing on every
+    // browser that has it.
+    expect(createWakeLockHolder(() => undefined).state).toBeNull();
+  });
+
+  it('reports an engine without the API as unavailable', () => {
+    const holder = createWakeLockHolder(() => undefined);
+    holder.request();
+    expect(holder.state).toBe('unavailable');
+  });
+
+  it('is pessimistic while a request is in flight', () => {
+    // The field must never claim a lock is held before the browser grants it.
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+    holder.request();
+    expect(holder.state).toBe('refused');
+  });
+
+  it('reports a granted lock as held', async () => {
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+    holder.request();
+    lock.grant(0);
+    await settle();
+    expect(holder.state).toBe('held');
+  });
+
+  it('releases the first sentinel when a second tap supersedes it', async () => {
+    // The leak. `request` used to call `release` first, but that only released
+    // a sentinel that had *already resolved* — so two taps before the first
+    // `request('screen')` settled left the first lock held forever, the screen
+    // awake past the end of the window, and `wake_lock` describing a lock that
+    // was not this window's.
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+
+    holder.request();
+    holder.request();
+    expect(lock.requests).toBe(2);
+
+    const first = lock.grant(0);
+    const second = lock.grant(1);
+    await settle();
+
+    expect(first.released).toBe(1);
+    expect(second.released).toBe(0);
+    expect(holder.state).toBe('held');
+  });
+
+  it('drops a request that settles after the window was released', async () => {
+    // DUB-12's own argument, in the eighth field. "Copy report" releases the
+    // lock and freezes the panel; a request settling afterwards used to write
+    // `held` onto a frozen report, and a second copy printed it.
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+
+    holder.request();
+    holder.release();
+    const late = lock.grant(0);
+    await settle();
+
+    expect(holder.state).toBe('refused');
+    // And it does not leak either: a result nobody wants is still a lock on
+    // the user's screen until someone releases it.
+    expect(late.released).toBe(1);
+  });
+
+  it('drops a rejection that settles after the window was released', async () => {
+    // The same untruth mirrored: the previous window's `refused` must not
+    // overwrite the current window's `held`.
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+
+    holder.request();
+    holder.request();
+    lock.grant(1);
+    await settle();
+    expect(holder.state).toBe('held');
+
+    lock.refuse(0);
+    await settle();
+    expect(holder.state).toBe('held');
+  });
+
+  it('keeps held through the overlay’s own release at the end of a window', async () => {
+    // DUB-12's detach-before-release ordering, which DUB-14 does not change. A
+    // window that ran its full minute with the lock in hand reads `held`,
+    // because that is what was true throughout it.
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+
+    holder.request();
+    const sentinel = lock.grant(0);
+    await settle();
+
+    holder.release();
+    expect(sentinel.released).toBe(1);
+    expect(holder.state).toBe('held');
+  });
+
+  it('reports released when the browser takes the lock back', async () => {
+    // The browser drops a screen lock by itself when the document becomes
+    // hidden and says so only through this event. Without it the field went on
+    // reading `held` while the screen was free to sleep.
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+
+    holder.request();
+    const sentinel = lock.grant(0);
+    await settle();
+
+    sentinel.autoRelease();
+    expect(holder.state).toBe('released');
+  });
+
+  it('does not let an auto-release from a superseded lock speak for this window', async () => {
+    // The generation guard and the `release` listener answer different
+    // questions, which is why both are needed: "is this result still ours" and
+    // "did the browser take it back". A stale sentinel firing `release` must
+    // not turn the live window's `held` into `released`.
+    const lock = fakeWakeLock();
+    const holder = createWakeLockHolder(() => lock.api);
+
+    holder.request();
+    const first = lock.grant(0);
+    await settle();
+
+    holder.request();
+    lock.grant(1);
+    await settle();
+    expect(holder.state).toBe('held');
+
+    first.autoRelease();
+    expect(holder.state).toBe('held');
   });
 });

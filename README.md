@@ -334,7 +334,7 @@ may be *added*; an existing one keeps both its name and its meaning.
 | `refresh_cap_hz`      | highest `fps` seen — says whether iOS capped at 120, 60, or 30 (Low Power Mode) |
 | **`busy_pct`**        | **main-thread busy ms per second of wall clock, as a percentage. DUB-6's gating figure** |
 | `busy_ms_per_s`       | the same figure unnormalised, for arithmetic                          |
-| `busy_window_s`       | wall clock the duty cycle was measured over. **Cross-check it against `elapsed_s`: on a completed run they agree to within a frame** |
+| `busy_window_s`       | wall clock the duty cycle was measured over, excluding absorbed hidden time. **Cross-check it against `elapsed_s`: on a clean run they agree to within a frame; on a tolerated one they differ by `hidden_s`** |
 | `draw_calls`          | `gl.draw*` calls in the last frame; `n/a` if the context is not WebGL |
 | `guests_rendered`     | dancers plus every queued guest. §11 caps this at 30                  |
 | `bartenders_rendered` | visible bartenders — one per owned lane on an open station            |
@@ -349,8 +349,8 @@ may be *added*; an existing one keeps both its name and its meaning.
 | `touch_points`        | `navigator.maxTouchPoints`. 0 on a desktop mouse, 5 on an iPhone       |
 | `heap_mb`             | `performance.memory` — **Chrome only, `n/a` on Safari**, never guessed |
 | `elapsed_s`           | time in the current measurement window                                |
-| `hidden_breaks`       | times the page became hidden while sampling. **Any value > 0 invalidates the run** |
-| `hidden_s`            | total time the page spent hidden during the window                     |
+| `hidden_breaks`       | times the page became hidden while sampling. Reported, never decisive — the verdict runs on `hidden_s` |
+| `hidden_s`            | total time the page spent hidden during the window. **Over 3.0 s invalidates the run**; at or under, it is absorbed — see "The hidden-time tolerance" |
 | `wake_lock`           | `held`, `refused`, `released` or `unavailable`. **Absent until a measurement is armed** — see "Keeping the screen awake" |
 | `window_frames`       | frames sampled in the window (frames spanning a hidden gap are not sampled) |
 | `sim_ms_p95` …        | per-system p95 from `FrameProbe` — which system spent the budget      |
@@ -375,7 +375,7 @@ printed, because fixing it means re-running anyway:
 | ----------------------------------------------- | --------------------------------- |
 | a measurement was armed with the button         | `no measurement started`          |
 | the full 60 s elapsed and the panel froze itself | `copied at 26 s of 60 s`, or `still running, 26 s of 60 s` while it is counting |
-| `hidden_breaks == 0`                            | `window was hidden for 8.8 s`     |
+| `hidden_s <= 3.0`                               | `window was hidden for 8.8 s`     |
 | `stress=1`, and the scene really was 25 / 9 / 3  | `scene was normal, not stress`, or `scene was 18/9/3, not 25/9/3` |
 
 The panel is outlined in red whenever the verdict is `no`, so it reads from
@@ -389,11 +389,51 @@ single enormous frame: `frame_ms_max 8750` and `frame_ms_mean 23.11` over 26 s,
 about twelve frames accounting for 15 of the 26 seconds. Both are now caught at
 the instrument. Hidden periods are counted and the frame that spans one is
 **discarded**, not averaged into `frame_ms_mean`, `frame_ms_max` or
-`fps_p1_worst` — and the window is then marked invalid, because a 60 s run
-missing 9 of its seconds is not a 60 s run.
+`fps_p1_worst` — and a window that loses more than the tolerance below is
+marked invalid, because a 60 s run missing 9 of its seconds is not a 60 s run.
 
 Copying before the minute is up is still allowed and still useful. The copied
 text just says `valid no — copied at N s of 60 s`, which is the truth about it.
+
+### The hidden-time tolerance
+
+**Up to 3.0 s of hidden time is absorbed. Past that the run is void.** The
+constant is `HIDDEN_TOLERANCE_MS` in `src/debug/overlay.ts`.
+
+The original rule voided on the *count* of hidden breaks, and it was right
+about the failure it was written for: a phone that locks its screen halfway
+through a minute gives you two thermally different half-minutes, and averaging
+them is not a measurement of either. It was far too strict for everything else.
+A notification sheet, a glance at the clock, an incoming call banner, one
+accidental swipe — each is about a second, and each cost a full 60 s re-run.
+Two owner attempts had already gone to measurement mechanics rather than to the
+build.
+
+Absorbing an interruption means three things together, and the report is only
+honest because it is all three:
+
+1. **The deadline moves out by the hidden period.** A run interrupted for 2 s
+   finishes 62 s of wall clock later, so it still collects a full minute of
+   real frames. Without this, tolerating an interruption would quietly turn the
+   C1 reading into a 58 s one.
+2. **The absorbed wall clock comes out of the duty-cycle denominator.**
+   `busy_pct` is work per second of wall clock, and absorbed hidden time is
+   wall clock with no frames in it — so leaving it in would make `busy_pct`
+   read low by exactly the hidden fraction. That is the same leniency the
+   freeze fix removed, arriving by a different route, and on the one figure
+   DUB-6 gates on. A tolerance that bought itself a softer gate would not be
+   worth having.
+3. **It is never silent.** `hidden_breaks` and `hidden_s` print on every
+   report, tolerated or voided. A run that absorbed 2.4 s says so, and a reader
+   can decide for themselves whether to believe it.
+
+Consequence worth knowing when you read a tolerated report: `busy_window_s`
+falls short of `elapsed_s` by about `hidden_s`, because `elapsed_s` is wall
+clock including the interruption and `busy_window_s` is the denominator
+excluding it. On an *uninterrupted* run the two still agree to within a frame,
+which is the cross-check below.
+
+A locked screen still voids, and should: 30 s is nowhere near 3 s.
 
 Note the last condition: **`?debug=1` without `stress=1` can never read
 `valid yes`.** That is deliberate. The overlay is still a perfectly good
@@ -401,10 +441,12 @@ read-out during normal play, but a C1 frame budget is only a C1 frame budget if
 it was taken on the C1 floor, and "roughly that busy" is not a scene two people
 can measure the same way twice.
 
-The verdict rules are one of the two parts of the overlay a test can reach
+The verdict rules are one of the four parts of the overlay a test can reach
 without a WebGL context — `src/debug/overlay.test.ts` asserts each reason string
-literally, including the precedence order. The other is the freeze latch (see
-"A frozen report is frozen").
+literally, including the precedence order, and pins both ends of the hidden-time
+tolerance. The other three are the freeze latch and the duty-cycle correction
+(see "A frozen report is frozen" and "The hidden-time tolerance") and the
+wake-lock holder (see "Keeping the screen awake").
 
 ### Keeping the screen awake
 
@@ -416,7 +458,7 @@ overlay is destroyed. `wake_lock` reports what happened:
 | ------------- | ----------------------------------------------------------------- |
 | *(no row)*    | no measurement has been armed, so no lock has been asked for      |
 | `held`        | granted, and still held when the window ended                     |
-| `refused`     | the browser declined, or the request is still in flight           |
+| `refused`     | the browser declined, the request is still in flight, or it was abandoned before it settled |
 | `released`    | granted, then **the browser took it back mid-window** — it does that when the document becomes hidden, so expect `hidden_breaks > 0` alongside it |
 | `unavailable` | this browser has no `navigator.wakeLock`                          |
 
@@ -429,10 +471,24 @@ reading `held` after the OS had taken the lock away. The overlay's *own* release
 at the end of a window does not produce `released`; a window that ran to
 completion with the lock still in hand reads `held`.
 
+The lock is owned by `createWakeLockHolder`, which tags every request with a
+generation and drops a promise that settles on a stale one. That closes two
+faults with one cause — an async result trusted without asking whether anyone
+still wanted it. Two taps on "Start" before the first `request('screen')`
+settled used to leak the first sentinel, leaving the screen awake past the end
+of the window and `wake_lock` describing a lock that was not this window's; and
+a request settling *after* "Copy report" used to write `held` onto an
+already-frozen report. The generation counter sits alongside the `release`
+listener rather than replacing it, because the two answer different questions:
+"is this result still ours" and "did the browser take the lock back". A
+superseded sentinel is released rather than dropped on the floor — the leak is
+the failure, so forgetting the reference is not a fix. Both races are asserted
+in `src/debug/overlay.test.ts` against a fake that settles on command.
+
 This is a mitigation, not a check. The protocol for a device measurement is
 "put the phone down and leave it", and a phone left alone locks its screen —
 which is precisely the hidden break above. A refused or unavailable lock
-therefore does **not** invalidate a run; `hidden_breaks` already catches the
+therefore does **not** invalidate a run; `hidden_s` already catches the
 failure directly, and treating the mitigation as the check would make a correct
 run on a browser without the API unreportable.
 
@@ -448,9 +504,9 @@ something read next to `dpr` and `canvas_px`.
 
 "Start 60 s measurement" resets the duty-cycle window too, and freezing the
 panel latches it — so `busy_pct` and `fps` in one report describe the same
-stretch of time, which you can check for yourself: on a completed run
-`busy_window_s` and `elapsed_s` agree to within a frame. See the next section
-for why that is worth checking.
+stretch of time, which you can check for yourself: on a completed, clean run
+`busy_window_s` and `elapsed_s` agree to within a frame, and on a tolerated one
+they differ by `hidden_s`. See the next section for why that is worth checking.
 
 ### A frozen report is frozen
 
@@ -462,9 +518,12 @@ game's own `FrameProbe`, which keeps running after the panel stops, so they are
 snapshotted at the freeze rather than re-read on each repaint.
 
 **Cross-check `busy_window_s` against `elapsed_s` on any report you are about to
-quote.** On a completed 60 s run they agree to within one frame. If they do not,
-something is wrong with the instrument and not with the formatting — say so
-rather than rounding it off.
+quote.** On a completed 60 s run with `hidden_s 0.0` they agree to within one
+frame. If `hidden_s` is non-zero they differ by about that much, because the
+absorbed time is in `elapsed_s` and deliberately not in the duty-cycle
+denominator — so the check is `elapsed_s - busy_window_s ≈ hidden_s`, with all
+three on the report. If that does not hold, something is wrong with the
+instrument and not with the formatting — say so rather than rounding it off.
 
 This was not true until DUB-12 and the error was in the lenient direction, which
 is why the cross-check is written down. The three `busy_*` fields were read live
