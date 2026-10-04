@@ -53,5 +53,39 @@ export const GUEST_TINTS = [NEON_MAGENTA, NEON_CYAN, NEON_VIOLET, INK_SECONDARY,
 /** Dance-floor tile at rest. --bg-raised; the beat tints it toward an accent. */
 export const FLOOR_TILE_REST = BG_RAISED;
 
-/** Beat colours the dance floor cycles through. The only animated-colour surface in the room. */
-export const BEAT_TINTS = [NEON_MAGENTA, NEON_VIOLET, NEON_CYAN, GOLD_VIP] as const;
+/**
+ * Beat colours the dance floor cycles through. The only animated-colour surface
+ * in the room.
+ *
+ * Gold is deliberately **not** in the rotation, for two reasons that only
+ * became visible once the floor lit more than one tile at a time (craft fix A).
+ * Blended part-way into the dark base it lands on olive-brown — the one muddy
+ * colour the palette can produce — and §10 assigns gold to *VIP guests, stars
+ * and cash*, so a gold floor puts the money colour under the gold cash bubble
+ * the player is trying to find. Magenta is the token the table actually names
+ * for "dance floor pulse".
+ */
+export const BEAT_TINTS = [NEON_MAGENTA, NEON_VIOLET, NEON_CYAN] as const;
+
+/**
+ * Blend two tints channel-wise, `t` of the way from `from` to `to`.
+ *
+ * This does not invent a colour. It interpolates *between two §10 tokens* —
+ * the same thing an alpha crossfade between two token-tinted sprites produces —
+ * and exists so a fading dance-floor tile can travel back to rest instead of
+ * popping. Both endpoints come from this file, so criterion 5 still holds:
+ * there is no third hex anywhere.
+ *
+ * `t` outside 0..1 is clamped, because a decay curve that overshoots by a
+ * rounding error must not wrap a channel and flash the wrong colour.
+ */
+export function mixTint(from: number, to: number, t: number): number {
+  const k = t < 0 ? 0 : t > 1 ? 1 : t;
+  const fromR = (from >> 16) & 0xff;
+  const fromG = (from >> 8) & 0xff;
+  const fromB = from & 0xff;
+  const r = Math.round(fromR + (((to >> 16) & 0xff) - fromR) * k);
+  const g = Math.round(fromG + (((to >> 8) & 0xff) - fromG) * k);
+  const b = Math.round(fromB + ((to & 0xff) - fromB) * k);
+  return (r << 16) | (g << 8) | b;
+}

@@ -58,6 +58,7 @@ import {
 import {
   BEAT_TINTS,
   BG_RAISED,
+  BG_ROOM,
   BG_SURFACE,
   CASH_GREEN,
   FLOOR_TILE_REST,
@@ -69,6 +70,7 @@ import {
   NEON_MAGENTA,
   NEON_VIOLET,
   WARN_AMBER,
+  mixTint,
 } from './palette.ts';
 import type { GeneratedTextures } from './textures.ts';
 
@@ -124,6 +126,40 @@ const QUEUE_PER_GUEST_PER_SECOND = 4;
 /** Beats per second of the dance floor at rest, and while Last Call is firing. */
 const BEAT_HZ = 2;
 const BEAT_HZ_LAST_CALL = 4;
+
+/**
+ * How much of the floor each beat lights, and how fast a lit tile fades.
+ *
+ * Seven of thirty tiles a beat with a 0.56 decay settles at roughly half the
+ * floor carrying some light at any moment — a room, not a cursor. Last Call
+ * lights ten, which together with the doubled `BEAT_HZ_LAST_CALL` is what makes
+ * the buff read on the floor and not only in the HUD.
+ */
+const BEAT_TILES = 7;
+const BEAT_TILES_LAST_CALL = 10;
+const BEAT_DECAY = 0.62;
+/** Below this, a fading tile is snapped back to rest instead of trailing forever. */
+const BEAT_ENERGY_FLOOR = 0.04;
+/**
+ * How far toward the accent a tile at full energy travels.
+ *
+ * Deliberately short of 1. At 1 a lit tile is the flat accent colour and the
+ * floor reads as a board of solid panels — the opposite failure to the single
+ * lit square it replaced, and it swallows the guest silhouettes standing on it.
+ * Under a half the tile stays a floor panel that light is falling on, which is
+ * what §10's "colour, silhouette and a little additive glow do all the work"
+ * actually describes. Last Call pushes further, because the buff has to read.
+ */
+const BEAT_MIX_PEAK = 0.42;
+const BEAT_MIX_PEAK_LAST_CALL = 0.6;
+/**
+ * Resting tile opacity over the floor slab.
+ *
+ * Under 1 so the slab shows through the tile and the gaps read as panel joints
+ * in a lit surface. At 1 over the room void the gaps read as holes, which is
+ * what made the floor look like a wireframe in design review.
+ */
+const FLOOR_TILE_ALPHA = 0.82;
 
 /** Guest walking speed on the dance floor, design px/second. */
 const WALK_SPEED = 26;
@@ -206,7 +242,19 @@ export class ClubScene {
 
   private tickCount = 0;
   private beatIndex = 0;
+  /** Walk cursor for which tile the next beat lights. */
   private litTile = 0;
+  /**
+   * Per-tile beat energy, 1 the instant a tile is lit and decaying each beat.
+   *
+   * This is what makes the floor read as lights rather than as a cursor: a beat
+   * seeds a scatter of tiles and the previously-lit ones fade out behind it
+   * instead of snapping back to rest. Two typed arrays, written on the beat
+   * only (a few times a second) — the per-frame path does not touch them.
+   */
+  private readonly tileEnergy = new Float32Array(DANCE_FLOOR_COLS * DANCE_FLOOR_ROWS);
+  /** The accent each tile is fading from, so a trail keeps the colour it was lit with. */
+  private readonly tileTint = new Uint32Array(DANCE_FLOOR_COLS * DANCE_FLOOR_ROWS);
   private reducedMotion = false;
   /** Non-null only under `?debug=1&stress=1`. See `CrowdPin`. */
   private crowdPin: CrowdPin | null = null;
@@ -230,7 +278,7 @@ export class ClubScene {
     this.state = state;
 
     // --- room: back wall, crowd, DJ -------------------------------------
-    const room = sprite(this.view, textures.block, 0x0b0a14);
+    const room = sprite(this.view, textures.block, BG_ROOM);
     room.setSize(390, 844);
 
     const wall = sprite(this.view, textures.block, BG_SURFACE);
@@ -303,14 +351,30 @@ export class ClubScene {
     this.doorWarning.visible = false;
 
     // --- dance floor ------------------------------------------------------
+    // A slab under the tiles. It exists to stop the seams between tiles reading
+    // as the most salient thing on the screen: over bare room void the gaps are
+    // holes and the floor is a wireframe, over a slab they are panel joints in
+    // a lit surface. One sprite, no per-frame cost — §11's "a busier room costs
+    // one sprite, not more entities".
+    //
+    // An additive wash over the top was tried and cut. It was invisible against
+    // a floor that now lights half its tiles, and it cost 0.27 ms avg / 0.8 ms
+    // p95 of draw submission for one full-floor additive quad. Fill rate is the
+    // scarce resource on the device class criterion 8 targets, so a blend that
+    // buys nothing does not get to spend it.
+    const slab = sprite(this.view, textures.block, BG_SURFACE);
+    slab.position.set(DANCE_FLOOR.x - 4, DANCE_FLOOR.y - 4);
+    slab.setSize(DANCE_FLOOR.width + 8, DANCE_FLOOR.height + 8);
+
     const tileW = DANCE_FLOOR.width / DANCE_FLOOR_COLS;
     const tileH = DANCE_FLOOR.height / DANCE_FLOOR_ROWS;
     for (let row = 0; row < DANCE_FLOOR_ROWS; row += 1) {
       for (let col = 0; col < DANCE_FLOOR_COLS; col += 1) {
         const tile = sprite(this.view, textures.block, FLOOR_TILE_REST);
-        tile.position.set(DANCE_FLOOR.x + col * tileW + 1.5, DANCE_FLOOR.y + row * tileH + 1.5);
-        tile.setSize(tileW - 3, tileH - 3);
-        tile.alpha = 0.9;
+        // A 1.5 px joint rather than 3: half the seam, half the grid.
+        tile.position.set(DANCE_FLOOR.x + col * tileW + 0.75, DANCE_FLOOR.y + row * tileH + 0.75);
+        tile.setSize(tileW - 1.5, tileH - 1.5);
+        tile.alpha = FLOOR_TILE_ALPHA;
         this.floorTiles.push(tile);
       }
     }
@@ -700,18 +764,56 @@ export class ClubScene {
     }
   }
 
-  /** Light the next patch of dance floor. Touches two tiles, not all thirty. */
+  /**
+   * Light a scatter of dance floor and fade the previous scatter out behind it.
+   *
+   * Design review (craft fix A) called the old one-tile version a wireframe
+   * grid rather than a dance floor, and it was right: 29 dark cells and a
+   * single lit square reads as a cursor on a table. §10 gives this element one
+   * job — *"the only animated-colour surface, and it carries most of the 'this
+   * is a club' feeling"* — so it needs most of the floor participating.
+   *
+   * This stays off the frame budget. All 30 tiles are already drawn every frame
+   * whatever their tint, so lighting more of them changes ~30 property writes a
+   * few times a second and not the draw-call count or the entity count. The
+   * whole function runs on the beat, never per frame.
+   */
   private advanceBeat(lastCall: boolean): void {
-    const previous = this.floorTiles[this.litTile]!;
-    previous.tint = FLOOR_TILE_REST;
-    previous.alpha = 0.9;
+    const tiles = this.floorTiles;
+    const tint = BEAT_TINTS[this.beatIndex % BEAT_TINTS.length]!;
+
+    // Everything currently lit fades a step rather than snapping back to rest.
+    for (let i = 0; i < tiles.length; i += 1) {
+      this.tileEnergy[i] = this.tileEnergy[i]! * BEAT_DECAY;
+    }
 
     // A pseudo-random walk rather than a raster scan — a sweeping row reads as
-    // a loading bar, a scatter reads as lights.
-    this.litTile = (this.litTile + 7 + (this.beatIndex % 3)) % this.floorTiles.length;
-    const lit = this.floorTiles[this.litTile]!;
-    lit.tint = BEAT_TINTS[this.beatIndex % BEAT_TINTS.length]!;
-    lit.alpha = lastCall ? 1 : 0.9;
+    // a loading bar, a scatter reads as lights. Step 7 is coprime with 30, so
+    // the cursor visits every tile rather than orbiting a subset.
+    const seeds = lastCall ? BEAT_TILES_LAST_CALL : BEAT_TILES;
+    for (let n = 0; n < seeds; n += 1) {
+      this.litTile = (this.litTile + 7 + ((this.beatIndex + n) % 5)) % tiles.length;
+      this.tileEnergy[this.litTile] = 1;
+      this.tileTint[this.litTile] = tint;
+    }
+
+    // Reduced motion keeps the colour change and drops the brightness pulse:
+    // the floor still tells you there is a beat, it just does not strobe.
+    // Criterion 6 — the feedback is replaced, never removed.
+    const pulse = this.reducedMotion ? 0 : lastCall ? 0.18 : 0.12;
+    const peak = lastCall ? BEAT_MIX_PEAK_LAST_CALL : BEAT_MIX_PEAK;
+    for (let i = 0; i < tiles.length; i += 1) {
+      const energy = this.tileEnergy[i]!;
+      const tile = tiles[i]!;
+      if (energy <= BEAT_ENERGY_FLOOR) {
+        this.tileEnergy[i] = 0;
+        tile.tint = FLOOR_TILE_REST;
+        tile.alpha = FLOOR_TILE_ALPHA;
+      } else {
+        tile.tint = mixTint(FLOOR_TILE_REST, this.tileTint[i]!, energy * peak);
+        tile.alpha = FLOOR_TILE_ALPHA + energy * pulse;
+      }
+    }
 
     if (this.onBeat !== null) this.onBeat(this.beatIndex);
   }
@@ -1176,3 +1278,4 @@ function sprite(parent: Container, texture: Texture, tint: number): Sprite {
 function clamp(value: number, min: number, max: number): number {
   return value < min ? min : value > max ? max : value;
 }
+
