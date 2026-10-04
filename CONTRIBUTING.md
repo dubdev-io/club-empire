@@ -54,7 +54,7 @@ A second GitHub account, added to the repository as a collaborator and used only
 
 **Asked and answered on 2026-10-04: not now.** The owner parked it until something actually needs it. So the seven rules above are not a stopgap waiting on an account; they are how we review, and a reviewer should not apologise for a `COMMENT` verdict.
 
-The standing decision, with the full cost and benefit written out, lives on Paperclip issue [DUB-28](https://github.com/dubdev-io/club-empire/issues). Reopen it there if a need appears — somebody outside the team has to be able to prove a pull request was reviewed, an outside contributor joins, or we want rule 4 enforced by the machine instead of by convention. If the answer ever becomes yes, rules 2 and 5 are revisited with it, and this file is the one place that changes.
+The standing decision, with the full cost and benefit written out, lives on Paperclip issue DUB-28. Reopen it there if a need appears — somebody outside the team has to be able to prove a pull request was reviewed, an outside contributor joins, or we want rule 4 enforced by the machine instead of by convention. If the answer ever becomes yes, rules 2 and 5 are revisited with it, and this file is the one place that changes.
 
 ## Where this came from
 
