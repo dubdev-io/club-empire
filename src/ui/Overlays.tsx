@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { OFFLINE_CAP_SECONDS, STATION_DEFS } from '../config/economy.ts';
 import { useGameStore } from '../state/store.ts';
+import { bootProgressAnimationDelayMs } from './bootProgress.ts';
 import { formatCash, formatCashExact, formatDuration, formatMinutes } from './format.ts';
 
 /**
@@ -269,10 +270,27 @@ export function Banners(): React.JSX.Element | null {
  * A club silhouette and a spinner, target under 1.5 s on mid-range Android.
  * The progress bar only appears after a second, because a bar that flashes up
  * and vanishes makes a fast load *feel* slow.
+ *
+ * The bar is in the tree from the first commit, revealed by an animation seeked
+ * to the navigation, rather than mounted when a timer says the second is up.
+ * DUB-21: during the boot window this thread is not ours — `startGame` holds it
+ * in unbroken tasks — so a `setTimeout` gating the mount never got a slot and
+ * the bar never appeared on exactly the slow loads it exists for. The reveal is
+ * handed to the compositor for the same reason the inlined fallback's bar is
+ * pure CSS: it has to work while nothing of ours is running.
  */
 export function BootScreen(): React.JSX.Element {
   const progress = useGameStore((s) => s.bootProgress);
-  const slow = useSlowLoad();
+  // Resolved once, at mount. Recomputing it per render would re-seek the reveal
+  // every time `bootProgress` ticks, which is a bar that never finishes fading in.
+  const [animationDelayMs] = useState(() => bootProgressAnimationDelayMs(performance.now()));
+
+  // Indeterminate until there is a figure to show, exactly as the inlined
+  // fallback is. `bootProgress` is still 0 at this commit and the next value
+  // lands on the far side of texture generation, so a determinate fill would sit
+  // at 0% for the whole window the bar is visible for — a bar that reads as
+  // broken rather than as busy.
+  const indeterminate = progress <= 0;
 
   return (
     <div className="boot" role="status" aria-label="Loading Club Empire">
@@ -283,42 +301,18 @@ export function BootScreen(): React.JSX.Element {
       </div>
       <p className="boot__title">CLUB EMPIRE</p>
       <div className="boot__spinner" aria-hidden="true" />
-      {slow && (
-        <div className="boot__progress" aria-hidden="true">
-          <div className="boot__progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
-        </div>
-      )}
+      <div
+        className="boot__progress"
+        aria-hidden="true"
+        style={{ animationDelay: `${animationDelayMs}ms` }}
+      >
+        <div
+          className={`boot__progress-fill${indeterminate ? ' boot__progress-fill--sweep' : ''}`}
+          style={indeterminate ? undefined : { width: `${Math.round(progress * 100)}%` }}
+        />
+      </div>
     </div>
   );
-}
-
-/** The brief's threshold: a progress bar, but only once the load is actually slow. */
-const BOOT_PROGRESS_AFTER_MS = 1000;
-
-/**
- * Has this load already taken longer than a second?
- *
- * Timed from the navigation, not from mount: `performance.now()` is ms since the
- * time origin, so a boot that has already spent 900 ms downloading the bundle
- * gets the bar 100 ms later rather than a second after React woke up. That is
- * also the same origin the inlined fallback's 1 s CSS delay measures from, so
- * the bar does not appear twice at two different moments across the handover.
- *
- * The previous condition was `bootProgress > 0`, and the runtime sets progress to
- * 0.25 on its first line — so the bar appeared immediately on every load, which
- * is the behaviour the doc comment above says it must not have.
- */
-function useSlowLoad(): boolean {
-  const [slow, setSlow] = useState(() => performance.now() >= BOOT_PROGRESS_AFTER_MS);
-
-  useEffect(() => {
-    if (slow) return;
-    const remaining = Math.max(0, BOOT_PROGRESS_AFTER_MS - performance.now());
-    const timer = window.setTimeout(() => setSlow(true), remaining);
-    return () => window.clearTimeout(timer);
-  }, [slow]);
-
-  return slow;
 }
 
 /**

@@ -24,10 +24,16 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import {
+  BOOT_PROGRESS_AFTER_MS,
+  BOOT_PROGRESS_CYCLE_MS,
+  bootProgressAnimationDelayMs,
+} from './bootProgress.ts';
 
 const main = readFileSync(new URL('../main.tsx', import.meta.url), 'utf8');
 const indexHtml = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
 const overlays = readFileSync(new URL('./Overlays.tsx', import.meta.url), 'utf8');
+const css = readFileSync(new URL('./ui.css', import.meta.url), 'utf8');
 
 describe('the React boot screen is committed before the game starts', () => {
   it('flushes the first render synchronously', () => {
@@ -77,11 +83,66 @@ describe('the inlined fallback carries the loading indicators itself', () => {
 });
 
 describe('the React progress bar waits out the same second', () => {
-  it('is gated on elapsed time, not on bootProgress being non-zero', () => {
-    expect(overlays).toMatch(/BOOT_PROGRESS_AFTER_MS = 1000/);
-    // `progress > 0` was the old condition, and the runtime sets progress to
-    // 0.25 on its first line — so the bar appeared instantly on every load,
-    // which is what the component's own doc comment says it must not do.
+  it('seeks the reveal to the navigation, not to mount', () => {
+    // A boot that has already spent 900 ms downloading the bundle is 100 ms from
+    // the threshold, not a second from it — and the inlined fallback it takes
+    // over from is counting from the same origin.
+    expect(bootProgressAnimationDelayMs(0)).toBe(0);
+    expect(bootProgressAnimationDelayMs(900)).toBe(-900);
+    expect(bootProgressAnimationDelayMs(999.6)).toBeCloseTo(-999.6, 5);
+  });
+
+  it('is negative, so the animation is running rather than pending', () => {
+    // A seek, not a wait. An animation still counting down a positive delay has
+    // not started, and starting it is work for the thread the boot has taken.
+    expect(bootProgressAnimationDelayMs(500)).toBeLessThan(0);
+    expect(bootProgressAnimationDelayMs(BOOT_PROGRESS_AFTER_MS + 1)).toBeLessThan(
+      -BOOT_PROGRESS_AFTER_MS,
+    );
+  });
+
+  it('never seeks past the end, whatever the clock says', () => {
+    // `.boot` mounting well after the threshold: the reveal is already over and
+    // `both` holds the last frame.
+    expect(bootProgressAnimationDelayMs(4000)).toBe(-BOOT_PROGRESS_CYCLE_MS);
+    expect(bootProgressAnimationDelayMs(Number.POSITIVE_INFINITY)).toBe(-BOOT_PROGRESS_CYCLE_MS);
+    expect(bootProgressAnimationDelayMs(-50)).toBe(0);
+    expect(bootProgressAnimationDelayMs(Number.NaN)).toBe(0);
+  });
+
+  it('hands the delay to CSS rather than to a timer (DUB-21)', () => {
+    // The defect: a `setTimeout` gating the mount. `startGame` holds the main
+    // thread across the whole boot window, so the callback was cleared by the
+    // unmount before it ever got a slot — measured at 10x CPU on `74fb0df`,
+    // `.boot` up 854 → 1411 with one 474 ms task from 937 to 1411.
+    expect(overlays).not.toMatch(/setTimeout\(/);
+    expect(overlays).toMatch(/animationDelay: `\$\{animationDelayMs\}ms`/);
+    // Unconditionally in the tree: there is no re-render to mount it with.
+    expect(overlays).not.toMatch(/\{slow && \(/);
     expect(overlays).not.toMatch(/\{progress > 0 && \(/);
+  });
+
+  it('sweeps rather than sitting at 0% while there is no figure to report', () => {
+    // `bootProgress` is 0 at the commit that puts the bar on screen and its next
+    // value lands after texture generation — on the far side of the blocked
+    // window. A determinate fill would be an empty track for exactly as long as
+    // the bar is visible, which reads as broken rather than as busy.
+    expect(overlays).toMatch(/const indeterminate = progress <= 0/);
+    expect(overlays).toMatch(/boot__progress-fill--sweep/);
+    // A transform, so the sweep keeps moving while the boot owns the thread —
+    // and the same geometry as `bf-sweep`, so the handover is invisible.
+    expect(css).toMatch(/@keyframes boot-progress-sweep\s*\{[^}]*\{\s*transform: translateX/);
+    expect(indexHtml).toMatch(/@keyframes bf-sweep/);
+  });
+
+  it('reveals with an animation, with the bar visible if animations are off', () => {
+    expect(css).toMatch(
+      new RegExp(`animation:\\s*boot-progress-reveal\\s+${BOOT_PROGRESS_CYCLE_MS}ms[^;]*\\bboth\\b`),
+    );
+    // The threshold expressed as a keyframe offset: 1000 of 1200 ms.
+    expect(css).toMatch(/@keyframes boot-progress-reveal\s*\{\s*0%,\s*83\.333%/);
+    // `from { opacity: 0 }` inside the keyframes, never on the rule: an
+    // `opacity: 0` base turns "animations disabled" into a bar nobody can see.
+    expect(css).not.toMatch(/\.boot__progress\s*\{[^}]*opacity:\s*0/);
   });
 });
