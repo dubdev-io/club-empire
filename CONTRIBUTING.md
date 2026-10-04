@@ -6,7 +6,7 @@ All of our automated work pushes, opens and reviews pull requests as **one GitHu
 
 We therefore carry the verdict in the review body instead of in the GitHub review state.
 
-**1. The reviewer posts a `COMMENT` review.** Its first line is exactly one of:
+**1. The reviewer posts a `COMMENT` review.** Its first line is exactly one of the following, optionally prefixed with Markdown heading marks (`## `) so it renders as a heading:
 
 ```
 Verdict: APPROVE — no changes requested
@@ -14,7 +14,7 @@ Verdict: APPROVE WITH NITS — <n> optional items
 Verdict: REQUEST CHANGES — <n> required items
 ```
 
-Nothing goes before that line. The rest of the review follows it.
+Nothing else goes before that line — the merger matches it after stripping any leading `#` characters and spaces. The rest of the review follows it.
 
 **2. The person or agent who merges reads that first line.** Do not wait for a green check. A pull request that we opened will never get one.
 
