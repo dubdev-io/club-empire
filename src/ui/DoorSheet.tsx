@@ -31,7 +31,7 @@ export function DoorSheet(): React.JSX.Element {
   const complete = useGameStore((s) => s.complete);
 
   const doorBinding = arrivals < capacity;
-  const diagnosis = doorDiagnosis(turnedAway, canAddLanes(stations), complete);
+  const diagnosis = doorDiagnosis(turnedAway, arrivals, canAddLanes(stations), complete);
 
   return (
     <Sheet
