@@ -84,6 +84,21 @@ describe('the DOOR sheet queue diagnosis', () => {
     expect(under.warn).toBe(false);
   });
 
+  it('stays quiet when there is no door to take a share of', () => {
+    // The divide's guard. Not reachable from a single `ClubFlow`, where
+    // `turnedAway <= arrivals` holds by construction — but the sheet reads
+    // `turnedAway` and `arrivals` off two separately published store slices, so
+    // the pairing is a publish-order promise rather than an invariant. Pinned
+    // because the failure mode is silent: `0.4 / 0` is `Infinity`, which clears
+    // the share threshold and restores the exact fresh-club alarm DUB-13
+    // removed. Dropping `arrivals > 0` leaves every other test in this file
+    // green.
+    const d = doorDiagnosis(0.4, 0, true, false);
+
+    expect(d.warn).toBe(false);
+    expect(d.glyph).not.toBe('⚠');
+  });
+
   it('points at levels, without a warning, once every lane is bought', () => {
     const d = doorDiagnosis(0.058, 3.225, false, false);
 
@@ -120,11 +135,19 @@ describe('the DOOR sheet queue diagnosis', () => {
     }
   });
 
-  it('keeps every neutral advice string inside the two-line box at 390 px', () => {
+  it('keeps every advice string inside the two-line box at 390 px', () => {
     // Measured at 390x844: the diagnosis box fits 64 characters on two lines
     // before it pushes the buy button down. Guarding the length here is cheaper
     // than re-measuring a screenshot every time the copy is edited.
+    //
+    // The amber tier is in the sweep too, not just the neutral three. At 60
+    // characters it is the longest of the four — the only one carrying both a
+    // lead and a rate — so leaving it out tested every line except the one
+    // nearest the budget, with four characters of headroom. The rate is
+    // already at its widest here: the Lv 8 door cannot turn away more than
+    // 3.22/s, which is the same six characters as 2.72/s.
     const strings = [
+      doorDiagnosis(2.72, 3.22, true, false),
       doorDiagnosis(0.4, 0.9, true, false),
       doorDiagnosis(0.058, 3.225, false, false),
       doorDiagnosis(0.058, 3.225, false, true),

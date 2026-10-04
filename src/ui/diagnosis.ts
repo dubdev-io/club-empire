@@ -76,8 +76,19 @@ export function doorDiagnosis(
   const rate = formatGuestRate(turnedAway);
 
   if (canAddLanes) {
-    // Guarded the way `BottomBar` guards it: with no arrivals there is no share
-    // to take, and tier A has already claimed every state where that is true.
+    // Load-bearing, and not for the reason it looks like. Inside one
+    // `ClubFlow` the divide is safe by construction — `turnedAway` is the
+    // undrained remainder of `arrivals`, so `turnedAway <= arrivals`
+    // identically — but the sheet never sees a `ClubFlow`. It reads two
+    // independently published store slices: `turnedAway` on the 10 Hz fast
+    // snapshot, `arrivals` on the purchase-time structural one, both
+    // defaulting to 0. What keeps them consistent is that `publishStructure`
+    // runs before `publishFast` at every call site, and that before the first
+    // structural publish `stations` is `[]` — so `canAddLanes` is false and
+    // this branch is unreachable. Reorder those publishes and `x / 0` is
+    // `Infinity`, not `NaN`, which is `>= QUEUE_WARNING_SHARE` and puts the
+    // fresh-club alarm straight back on screen. The guard is cheaper than the
+    // coupling.
     const severe = arrivals > 0 && turnedAway / arrivals >= QUEUE_WARNING_SHARE;
 
     return severe
