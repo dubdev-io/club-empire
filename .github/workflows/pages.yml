@@ -42,7 +42,13 @@ on:
       # review push to one of them would still deploy itself — if that happens,
       # re-dispatch this workflow on the branch below. `build` on the overlay is
       # the short SHA, which is how you tell which build you are looking at.
-      - DUB-12-overlay-busy-freeze
+      #
+      # DUB-16 moves it one last time, onto the Phase 1 integration branch. That
+      # branch is the single commit the DUB-6 QA pass measures — craft pass,
+      # the three Phase 1 defect fixes and the `?debug=1` overlay — so it is the
+      # only build that should be reachable at the published URL while the pass
+      # runs. Every earlier preview source is superseded.
+      - phase1-build
   # So a deploy can be kicked off by hand without waiting for the next commit.
   workflow_dispatch:
 
