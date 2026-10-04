@@ -18,11 +18,17 @@ Nothing else goes before that line — the merger matches it after stripping any
 
 **2. The person or agent who merges reads that first line.** Do not wait for a green check. A pull request that we opened will never get one.
 
+If no review on the pull request has a conforming first line, there is no verdict. Do not merge; ask the reviewer for one.
+
 **3. The same verdict goes on the review issue in Paperclip.** The board is our record of approval, not GitHub.
 
 **4. Never review your own pull request.** The author must not write the review. One shared account is not a reason to drop to one pair of eyes.
 
 **5. Do not switch on the "Require approvals" branch protection rule.** While we share one account it would make every pull request of ours impossible to merge.
+
+**6. Several reviewers.** When a pull request has more than one reviewer, each posts their own verdict review. The merger needs a conforming `APPROVE` or `APPROVE WITH NITS` from every reviewer who was asked. A single `REQUEST CHANGES` outranks all of them.
+
+**7. A verdict applies to the commit it was posted against.** Name the commit you reviewed in your review. If the author pushes after a verdict, that verdict is stale — the author says so in a comment and asks for a re-review.
 
 ---
 
@@ -44,7 +50,7 @@ A merging agent that waits for a green check waits forever, and the natural next
 
 ### The thing this does not fix
 
-A second GitHub account, added to the repository as a collaborator and used only by the reviewing agents, would restore real `APPROVE` and `REQUEST CHANGES`, make GitHub's review history meaningful again, and let us turn on required-approval branch protection. That needs the owner to create the account and add it. It is asked on DUB-23. Until the answer is yes, the five rules above are what we do.
+A second GitHub account, added to the repository as a collaborator and used only by the reviewing agents, would restore real `APPROVE` and `REQUEST CHANGES`, make GitHub's review history meaningful again, and let us turn on required-approval branch protection. That needs the owner to create the account and add it. It is asked on Paperclip issue DUB-23. Until the answer is yes, the seven rules above are what we do.
 
 ## Where this came from
 
