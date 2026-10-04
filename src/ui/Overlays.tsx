@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { OFFLINE_CAP_SECONDS, STATION_DEFS } from '../config/economy.ts';
 import { useGameStore } from '../state/store.ts';
 import { formatCash, formatCashExact, formatDuration, formatMinutes } from './format.ts';
@@ -271,6 +272,7 @@ export function Banners(): React.JSX.Element | null {
  */
 export function BootScreen(): React.JSX.Element {
   const progress = useGameStore((s) => s.bootProgress);
+  const slow = useSlowLoad();
 
   return (
     <div className="boot" role="status" aria-label="Loading Club Empire">
@@ -281,13 +283,42 @@ export function BootScreen(): React.JSX.Element {
       </div>
       <p className="boot__title">CLUB EMPIRE</p>
       <div className="boot__spinner" aria-hidden="true" />
-      {progress > 0 && (
+      {slow && (
         <div className="boot__progress" aria-hidden="true">
           <div className="boot__progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
         </div>
       )}
     </div>
   );
+}
+
+/** The brief's threshold: a progress bar, but only once the load is actually slow. */
+const BOOT_PROGRESS_AFTER_MS = 1000;
+
+/**
+ * Has this load already taken longer than a second?
+ *
+ * Timed from the navigation, not from mount: `performance.now()` is ms since the
+ * time origin, so a boot that has already spent 900 ms downloading the bundle
+ * gets the bar 100 ms later rather than a second after React woke up. That is
+ * also the same origin the inlined fallback's 1 s CSS delay measures from, so
+ * the bar does not appear twice at two different moments across the handover.
+ *
+ * The previous condition was `bootProgress > 0`, and the runtime sets progress to
+ * 0.25 on its first line — so the bar appeared immediately on every load, which
+ * is the behaviour the doc comment above says it must not have.
+ */
+function useSlowLoad(): boolean {
+  const [slow, setSlow] = useState(() => performance.now() >= BOOT_PROGRESS_AFTER_MS);
+
+  useEffect(() => {
+    if (slow) return;
+    const remaining = Math.max(0, BOOT_PROGRESS_AFTER_MS - performance.now());
+    const timer = window.setTimeout(() => setSlow(true), remaining);
+    return () => window.clearTimeout(timer);
+  }, [slow]);
+
+  return slow;
 }
 
 /**

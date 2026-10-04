@@ -1,5 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import { startGame } from './game/runtime.ts';
 import { useGameStore } from './state/store.ts';
 import { App } from './ui/App.tsx';
@@ -15,15 +16,27 @@ if (!gameRoot || !uiRoot) {
 // The React tree mounts first so the boot state paints while the WebGL context
 // and textures are still being created. On a mid-range phone that is the
 // difference between a blank screen and a visible loading state.
-createRoot(uiRoot).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+//
+// `flushSync`, not a plain `render`. A concurrent root schedules its first
+// commit on React's scheduler, and the module below then runs `startGame()`,
+// whose WebGL-context and texture work holds the main thread. The commit
+// therefore landed *after* boot had already set `booting: false`, so the boot
+// screen was never once in the DOM — measured at 0 commits containing `.boot`
+// across every CPU rate (DUB-11 defect 3). Forcing the commit synchronously
+// makes the boot tree the DOM before any of that starts.
+const root = createRoot(uiRoot);
+flushSync(() => {
+  root.render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+});
 
 // Remove the pre-bundle fallback now that React owns the boot state. Both are
 // the same dark room with the same silhouette, so there is no flash between
-// them.
+// them — and because the line above committed synchronously, React's boot screen
+// is already in the DOM at this point rather than one scheduler tick away.
 document.getElementById('boot-fallback')?.remove();
 
 if (import.meta.env.DEV) {
@@ -66,31 +79,50 @@ const stressRequested = debugRequested && params.get('stress') === '1';
 // The Pixi runtime deliberately lives outside React. React re-renders are not
 // a safe place to own a WebGL context, and StrictMode's double-invoked effects
 // would create two of them in development.
+/**
+ * Run `boot` after the browser has actually painted.
+ *
+ * A synchronous commit is not a paint: the pixels only change when this task
+ * yields. `startGame` is largely synchronous once it resumes — the WebGL
+ * context, then every generated texture — so starting it in this task means the
+ * boot screen is committed and then replaced without ever having been seen.
+ * The rAF callback runs just *before* a paint, and a timeout scheduled from
+ * inside it runs just *after* it, which is the one ordering that guarantees the
+ * boot screen reached the screen. The cost is a single frame on a cold load.
+ */
+function afterFirstPaint(boot: () => void): void {
+  requestAnimationFrame(() => {
+    window.setTimeout(boot, 0);
+  });
+}
+
 if (!NO_BOOT) {
-  void startGame(gameRoot, { stress: stressRequested }).then(
-    (runtime) => {
-      if (!debugRequested) return;
-      // Dynamic, and reached only behind the flag — so Rolldown emits the
-      // overlay as its own chunk and the browser never fetches it in normal
-      // play. This is the whole of acceptance criterion 1.
-      void import('./debug/overlay.ts')
-        .then(({ mountDebugOverlay }) => {
-          mountDebugOverlay(runtime, { build: __CLUB_BUILD__, stress: stressRequested });
-        })
-        .catch((error: unknown) => {
-          // A dead instrument, not a dead game: the club keeps running and the
-          // player (or the owner, on the wrong network) just has no read-out.
-          console.error('Club Empire debug overlay failed to load', error);
-        });
-    },
-    (error: unknown) => {
-      console.error('Club Empire failed to start', error);
-      // Whatever went wrong, the player must not be left looking at a boot
-      // spinner forever. `startGame` already handles the WebGL case specifically;
-      // this is the catch-all for anything else, and it names the problem rather
-      // than showing a dark screen with no explanation.
-      useGameStore.getState().setWebglUnavailable(true);
-      useGameStore.getState().setBooting(false, 1);
-    },
-  );
+  afterFirstPaint(() => {
+    void startGame(gameRoot, { stress: stressRequested }).then(
+      (runtime) => {
+        if (!debugRequested) return;
+        // Dynamic, and reached only behind the flag — so Rolldown emits the
+        // overlay as its own chunk and the browser never fetches it in normal
+        // play. This is the whole of acceptance criterion 1.
+        void import('./debug/overlay.ts')
+          .then(({ mountDebugOverlay }) => {
+            mountDebugOverlay(runtime, { build: __CLUB_BUILD__, stress: stressRequested });
+          })
+          .catch((error: unknown) => {
+            // A dead instrument, not a dead game: the club keeps running and the
+            // player (or the owner, on the wrong network) just has no read-out.
+            console.error('Club Empire debug overlay failed to load', error);
+          });
+      },
+      (error: unknown) => {
+        console.error('Club Empire failed to start', error);
+        // Whatever went wrong, the player must not be left looking at a boot
+        // spinner forever. `startGame` already handles the WebGL case
+        // specifically; this is the catch-all for anything else, and it names
+        // the problem rather than showing a dark screen with no explanation.
+        useGameStore.getState().setWebglUnavailable(true);
+        useGameStore.getState().setBooting(false, 1);
+      },
+    );
+  });
 }

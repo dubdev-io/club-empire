@@ -33,9 +33,106 @@
       #boot-fallback {
         position: absolute;
         inset: 0;
-        display: grid;
-        place-items: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
         background: #0b0a14;
+      }
+
+      /* The spinner and the progress bar have to live here, not only in the
+         React boot screen. The slow part of a cold load is downloading and
+         parsing the bundle, and during it no JavaScript of ours is running at
+         all — so anything React owns cannot be on screen for the one phase that
+         is actually long enough to need a loading indicator. Pure CSS, no JS.
+         Geometry and colours mirror `.boot__*` in src/ui/ui.css so the handover
+         to React is invisible. */
+      #boot-fallback .bf-silhouette {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        height: 64px;
+      }
+
+      #boot-fallback .bf-bar {
+        width: 24px;
+        background: #231f3a;
+        border-radius: 6px 6px 0 0;
+      }
+
+      #boot-fallback .bf-title {
+        margin: 0;
+        font: 600 16px/1.4 system-ui, sans-serif;
+        letter-spacing: 0.24em;
+        color: #a9a2c9;
+      }
+
+      #boot-fallback .bf-spinner {
+        width: 24px;
+        height: 24px;
+        border: 2px solid #231f3a;
+        border-top-color: #ff3d9a;
+        border-radius: 999px;
+        animation: bf-spin 900ms linear infinite;
+      }
+
+      @keyframes bf-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* "A progress bar appears if the load exceeds 1 s" — expressed as a 1 s
+         animation delay, because without JS there is nothing to time it with.
+         A load that finishes first never shows the bar at all, which is the
+         point: a bar that flashes for 200 ms reads as a glitch. */
+      #boot-fallback .bf-progress {
+        width: 50%;
+        height: 4px;
+        background: #231f3a;
+        border-radius: 999px;
+        overflow: hidden;
+        opacity: 0;
+        animation: bf-reveal 200ms linear 1s forwards;
+      }
+
+      /* Indeterminate on purpose: before the bundle runs there is no number to
+         report, and a fake percentage is worse than an honest "still working".
+         React's boot screen swaps in the real figure when it takes over. */
+      #boot-fallback .bf-progress-fill {
+        width: 40%;
+        height: 100%;
+        background: #ff3d9a;
+        border-radius: 999px;
+        animation: bf-sweep 1.4s ease-in-out infinite;
+      }
+
+      @keyframes bf-reveal {
+        to {
+          opacity: 1;
+        }
+      }
+
+      @keyframes bf-sweep {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(250%);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #boot-fallback .bf-spinner {
+          animation-duration: 2.4s;
+        }
+
+        #boot-fallback .bf-progress-fill {
+          animation: none;
+          width: 100%;
+          opacity: 0.4;
+        }
       }
     </style>
   </head>
@@ -52,20 +149,24 @@
       (or black) flash on every cold load. Inlined here so it paints on the
       first frame the browser gets, with the same colours as the React boot
       screen that replaces it — so the handover is invisible. Removed by
-      `main.tsx`.
+      `main.tsx`, immediately after React has committed its own boot screen.
+
+      This carries the spinner and the progress bar itself rather than leaving
+      them to React. The download-and-parse phase is the long one on a cold
+      mobile load, and it is exactly the phase in which none of our JavaScript
+      has run — so a loading indicator that only exists in a component is not on
+      screen when it is needed.
     -->
-    <div id="boot-fallback">
-      <div
-        style="
-          display: flex;
-          align-items: flex-end;
-          gap: 8px;
-          height: 64px;
-        "
-      >
-        <span style="width: 24px; height: 60%; background: #231f3a; border-radius: 6px 6px 0 0"></span>
-        <span style="width: 24px; height: 100%; background: #231f3a; border-radius: 6px 6px 0 0"></span>
-        <span style="width: 24px; height: 75%; background: #231f3a; border-radius: 6px 6px 0 0"></span>
+    <div id="boot-fallback" role="status" aria-label="Loading Club Empire">
+      <div class="bf-silhouette" aria-hidden="true">
+        <span class="bf-bar" style="height: 60%"></span>
+        <span class="bf-bar" style="height: 100%"></span>
+        <span class="bf-bar" style="height: 75%"></span>
+      </div>
+      <p class="bf-title">CLUB EMPIRE</p>
+      <div class="bf-spinner" data-spinner aria-hidden="true"></div>
+      <div class="bf-progress" data-progress aria-hidden="true">
+        <div class="bf-progress-fill"></div>
       </div>
     </div>
 
