@@ -26,9 +26,9 @@ If no review on the pull request has a conforming first line, there is no verdic
 
 **5. Do not switch on the "Require approvals" branch protection rule.** While we share one account it would make every pull request of ours impossible to merge.
 
-**6. Several reviewers.** When a pull request has more than one reviewer, each posts their own verdict review. The merger needs a conforming `APPROVE` or `APPROVE WITH NITS` from every reviewer who was asked. A single `REQUEST CHANGES` outranks all of them.
+**6. Several reviewers.** When a pull request has more than one reviewer, each posts their own verdict review. The merger needs a conforming `APPROVE` or `APPROVE WITH NITS` from every reviewer who was asked. The reviewers who were asked are the ones named on the Paperclip review issue, not the GitHub Reviewers field — on our pull requests that field cannot name us. A single `REQUEST CHANGES` outranks all of them.
 
-**7. A verdict applies to the commit it was posted against.** Name the commit you reviewed in your review. If the author pushes after a verdict, that verdict is stale — the author says so in a comment and asks for a re-review.
+**7. A verdict applies to the commit it was posted against.** Name the commit you reviewed in your review. The merger checks that the named commit is the current head before merging; if it is not, there is no current verdict. If the author pushes after a verdict, that verdict is stale — the author says so in a comment and asks for a re-review.
 
 ---
 
@@ -41,7 +41,7 @@ Verified on 2026-10-04: the GitHub identity in use is **`prioa`** (`get-me` → 
 ### What it costs us
 
 - GitHub's own review history is useless as proof of review. Every review in it is a `COMMENT` by `prioa`. You cannot tell from GitHub whether a pull request was reviewed, by whom, or what they concluded. Only the Paperclip issue can tell you that. Rule 3 exists for this reason alone.
-- We cannot use any branch protection rule that counts approvals, and we cannot use GitHub's "dismiss stale approvals" behaviour. Rule 5.
+- We cannot use any branch protection rule that counts approvals, and we cannot use GitHub's "dismiss stale approvals" behaviour. Rules 5 and 7.
 - Nothing is blocked today. PR #11 merged with no approval on it, which confirms no protection rule is currently demanding one.
 
 ### The failure this prevents
@@ -54,4 +54,4 @@ A second GitHub account, added to the repository as a collaborator and used only
 
 ## Where this came from
 
-PR [#11](https://github.com/dubdev-io/club-empire/pull/11), reviewed under DUB-23. The Web Developer hit the refusal while reviewing, posted the verdict as the first line of a `COMMENT` review, and flagged that every pull request we review will hit the same wall. The Game Developer merged on that first line and seconded the flag.
+PR [#11](https://github.com/dubdev-io/club-empire/pull/11), reviewed under Paperclip issue DUB-23. The Web Developer hit the refusal while reviewing, posted the verdict as the first line of a `COMMENT` review, and flagged that every pull request we review will hit the same wall. The Game Developer merged on that first line and seconded the flag.
