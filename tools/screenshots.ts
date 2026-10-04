@@ -135,6 +135,15 @@ interface Shot {
   readonly reducedMotion?: boolean;
   /** Extra settle time, for states with an animation worth catching. */
   readonly settleMs?: number;
+  /**
+   * Run after the settle, to bring a row below the fold into frame.
+   *
+   * A sheet with three stations is taller than 844 px, so the third card is
+   * off-screen in every shot of it. It cannot go in `drive`: the rows do not
+   * exist until React has rendered the sheet, which is what the settle waits
+   * for.
+   */
+  readonly scroll?: string;
 }
 
 const FRESH = `localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)});`;
@@ -174,6 +183,29 @@ function seededSave(lastSeenAt: number): string {
     JSON.stringify(save),
   )});`;
 }
+
+/**
+ * Three bars at Door Lv 1, with Tap and Cocktail bought out to three lanes.
+ *
+ * The state DUB-24 exists for, and it needs two shots because three station
+ * cards do not fit in 844 px. Routing sends guests to the highest price first,
+ * so Booth Service sits at capacity on its one lane while the four idle lanes
+ * below it absorb the overflow and the club turns away **nobody** —
+ * `turnedAwayPerSecond` is 0.000/s. The old sheet put
+ * `⚠ Queue — … Add a lane.` on that card, over a £140,000 lane that converts
+ * nothing, directly contradicting the two quiet cards above it.
+ */
+const SATURATED_NO_QUEUE = `
+  const S = () => window.__clubStore.getState();
+  window.__club.grant(1e9);
+  S().actions.unlockStation('cocktail');
+  S().actions.unlockStation('booth');
+  for (const key of ['tap', 'cocktail']) {
+    for (let i = 0; i < 2; i++) S().actions.buyLane(key);
+  }
+  S().setStar(null);
+  S().openSheet('bars');
+`;
 
 const SHOTS: readonly Shot[] = [
   {
@@ -431,6 +463,63 @@ const SHOTS: readonly Shot[] = [
     drive: `window.__clubStore.getState().openSheet('door');`,
     settleMs: 700,
   },
+  {
+    // DUB-24, the three states the Bars sheet's severity rule is judged on.
+    //
+    // 19 is the same state one sheet over. The Bars sheet was the surface that
+    // still had no severity in it at all, so this is the shot that shows the
+    // amber gone from second zero: one saturated station, a £400 lane behind a
+    // padlock, and the £5 upgrade left as the only thing coloured like an
+    // action. Same reason as 19 for having no `drive` beyond opening the
+    // sheet — a single purchase stops it being the first state a player sees.
+    name: '20-bars-fresh',
+    note: 'BARS sheet on a brand-new club — 44% of the door, advice given, no amber alarm',
+    seed: FRESH,
+    drive: `window.__clubStore.getState().openSheet('bars');`,
+    settleMs: 700,
+  },
+  {
+    // The state that proved the old line *false* rather than merely early —
+    // see `SATURATED_NO_QUEUE`. This is the top of the sheet: the two cards
+    // that were already right, and are no longer contradicted by the third.
+    name: '21-bars-saturated-no-queue',
+    note: 'BARS sheet, saturated with no queue — the two idle cards, both naming the Door',
+    seed: FRESH,
+    drive: SATURATED_NO_QUEUE,
+    settleMs: 900,
+  },
+  {
+    // The same frame, scrolled to Booth Service: the card that was amber, and
+    // the one this ticket exists for. Kept as a second shot rather than as a
+    // scroll on 21 because the claim is that all three cards agree, and three
+    // station cards do not fit in 844 px — so the pair is the evidence.
+    name: '22-bars-no-queue-booth',
+    note: 'BARS sheet, saturated with no queue — Booth Service, the card that used to shout',
+    seed: FRESH,
+    drive: SATURATED_NO_QUEUE,
+    settleMs: 900,
+    scroll: `document.querySelector('.sheet__body').scrollTop = 1e6;`,
+  },
+  {
+    // The state the alarm exists for, and the agreement check.
+    //
+    // Door Lv 5 with one Tap lane and one Cocktail lane: 1.03/s of 1.87/s is
+    // 55%, over the share the Hud banner and the DOOR badge gate on. Both cards
+    // go amber *and* the banner is up in the same frame — which is the whole
+    // point of gating on the club's queue instead of each station's saturation.
+    name: '23-bars-severe',
+    note: 'BARS sheet at 55% turned away — amber on both cards, HUD banner up in the same frame',
+    seed: FRESH,
+    drive: `
+      const S = () => window.__clubStore.getState();
+      window.__club.grant(1e9);
+      S().actions.unlockStation('cocktail');
+      for (let i = 0; i < 4; i++) S().actions.upgradeDoor();
+      S().setStar(null);
+      S().openSheet('bars');
+    `,
+    settleMs: 900,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -499,6 +588,11 @@ async function main(): Promise<void> {
 
       if (shot.drive !== undefined) await cdp.evaluate(`${shot.drive} return true;`);
       await sleep(shot.settleMs ?? 400);
+
+      if (shot.scroll !== undefined) {
+        await cdp.evaluate(`${shot.scroll} return true;`);
+        await sleep(250);
+      }
 
       const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
         format: 'png',

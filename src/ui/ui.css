@@ -437,7 +437,15 @@
   font-size: var(--text-sm);
   color: var(--ink-secondary);
   display: flex;
-  align-items: center;
+  /* The glyph is a bullet for the sentence, so it belongs on the sentence's
+     first line. `center` put it halfway down a *wrapped* body, which at 390 px
+     is both `Full house` cards and, since the class is shared, the Door sheet
+     too — the `◦` floated into the gap between the two lines and read as a
+     stray mark rather than as the line's marker. An explicit `line-height`
+     keeps the two columns on the same leading, so the glyph sits on the first
+     line's baseline instead of on whatever the UA default happens to be. */
+  align-items: flex-start;
+  line-height: 1.4;
   gap: var(--space-2);
 }
 

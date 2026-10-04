@@ -145,29 +145,88 @@ const IDLE_LANES_EPSILON = 0.5;
 /**
  * One station's line: a queue, an idle bartender, or nothing.
  *
- * Same defect and same rule as `doorDiagnosis`. The old line branched on
- * `saturated` alone, so at three lanes it said "Add a lane" directly above a
- * row reading `3 LANES` — and at full build-out it said it on all three cards
- * at once, in amber, behind the CLUB COMPLETE card. A reward screen landing
- * over three warnings is the opposite of what a reward screen is for.
+ * Same defect and same rule as `doorDiagnosis`, fixed in two passes.
  *
- * So `⚠` is kept for exactly the case it teaches: this station is saturated
- * *and* a lane can still be bought. With the lane gone the same fact is stated
- * without an imperative, and the lever named is the one that still exists.
+ * The first pass took the amber off the states where no lane can be bought: at
+ * three lanes it said "Add a lane" directly above a row reading `3 LANES`, and
+ * at full build-out it said it on all three cards at once, in amber, behind the
+ * CLUB COMPLETE card. A reward screen landing over three warnings is the
+ * opposite of what a reward screen is for.
+ *
+ * That left the second axis missing, exactly as it did on the Door (DUB-24).
+ * Purchasability alone still lit the `⚠` on every saturated station, and
+ * saturation is the club's *default* condition — so the identical alarm was on
+ * at second zero, at Door Lv 5 and at full lane build-out. Worse, it was often
+ * simply false. Routing sends each guest to the highest-price station with a
+ * free lane and overflows *down* the price order, so a station can be saturated
+ * while the club turns away nobody: three bars at Door Lv 1 put Booth Service
+ * at capacity with `turnedAwayPerSecond = 0`, and the card shouted "Queue" and
+ * "Add a lane" — a £140,000 lane that converts nothing — while the two quiet
+ * cards beside it gave the correct advice and were contradicted by it.
+ *
+ * So a station's severity is **the club's door queue, not its own saturation**.
+ * A saturated lane costs nothing by itself; the loss is only ever realised at
+ * the door, because the overflow is price-ordered and lands on a cheaper lane
+ * first. The comparison is the same constant the HUD banner, the DOOR badge and
+ * `doorDiagnosis` already use, so in any one frame all four surfaces agree.
+ *
+ * Purchasability still decides whether advice is *given* — and only
+ * purchasability. Affordability is deliberately not consulted: `BuyButton`
+ * already renders a padlock and a dimmed price one row down, and gating here
+ * too would double the signal and flicker the sentence as cash crosses the
+ * price.
  */
 export function stationDiagnosis(
   station: Pick<
     StationView,
     'saturated' | 'idleLanes' | 'laneCost' | 'maxed' | 'servedPerSecond' | 'capacityPerSecond'
   >,
+  turnedAway: number,
+  arrivals: number,
+  doorMaxed: boolean,
 ): Diagnosis | null {
   if (station.saturated) {
     if (station.laneCost !== null) {
+      // Guarded the way `doorDiagnosis` and `BottomBar` guard it: with no
+      // arrivals there is no share to take, and a club with no arrivals is
+      // turning nobody away either, so it lands in the no-queue tier below.
+      const share = arrivals > 0 ? turnedAway / arrivals : 0;
+
+      if (share >= QUEUE_WARNING_SHARE) {
+        // Verbatim the old line. When it was true it was already right; the bug
+        // was only ever the states it also fired in.
+        return {
+          warn: true,
+          glyph: '⚠',
+          lead: 'Queue',
+          body: 'every lane is busy. Add a lane.',
+        };
+      }
+
+      if (turnedAway > QUEUE_EPSILON) {
+        return {
+          // Same advice, no lead. The amber tier's "Queue —" is what makes the
+          // line read as an alarm, and an ordinary condition of play must not
+          // borrow it.
+          warn: false,
+          glyph: '◦',
+          lead: null,
+          body: 'Every lane is busy. Another lane serves more.',
+        };
+      }
+
+      // Saturated with nobody queueing: this station is simply absorbing its
+      // slice of the price-ordered overflow. A lane here converts nothing. The
+      // lead is the one already used for "every lane is busy", and the lever is
+      // deliberately the same one the idle cards name, so the sheet reads as
+      // one diagnosis instead of an argument with itself.
       return {
-        warn: true,
-        glyph: '⚠',
-        lead: 'Queue',
-        body: 'every lane is busy. Add a lane.',
+        warn: false,
+        glyph: '◦',
+        lead: 'Full house',
+        body: doorMaxed
+          ? 'every lane is pouring. Levels are what pay now.'
+          : 'every lane is pouring. Raise the Door.',
       };
     }
 
