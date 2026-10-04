@@ -40,11 +40,16 @@
 #
 #   eval "$(sh tools/paperclip-git.sh --activate)"
 #
-# That one line installs git on first use, then puts it first on PATH for the
-# current shell. Check it with `git --version`. After that, use git and the
-# launcher as normal:
+# That one line installs git on first use, then makes it the git that runs in
+# the current shell. Check it with `git --version`, then use plain git:
 #
-#   "$PAPERCLIP_GITHUB_LAUNCHER_DIR/git" push -u origin HEAD
+#   git push -u origin HEAD
+#
+# The managed GitHub launcher delivers credentials through its own `git` wrapper,
+# so --activate keeps $PAPERCLIP_GITHUB_LAUNCHER_DIR ahead of this install and
+# lets the wrapper find the new git behind it. Put this install in front of the
+# launcher by hand and pushes fail with `could not read Username` while
+# `gh auth status` still reports a healthy login.
 #
 # Other modes:
 #
@@ -224,8 +229,19 @@ case "$mode" in
 	echo "$bin_dir"
 	;;
 --activate)
-	say "paperclip-git: git $installed_version is now first on PATH."
-	echo "export PATH=\"$bin_dir:\$PATH\""
+	# The launcher's `git` wrapper is how credentials reach git, and it resolves
+	# the real git from the PATH behind it. So it has to stay first and this
+	# install goes directly behind it: the wrapper then runs the new git, and
+	# both the credentials and the config isolation work. Prepending this install
+	# instead takes the wrapper out of the path of `git` altogether, and the only
+	# symptom is `could not read Username` on the first push.
+	if [ -x "${PAPERCLIP_GITHUB_LAUNCHER_DIR:-}/git" ]; then
+		say "paperclip-git: git $installed_version now runs behind the GitHub launcher."
+		echo "export PATH=\"\$PAPERCLIP_GITHUB_LAUNCHER_DIR:$bin_dir:\$PATH\""
+	else
+		say "paperclip-git: git $installed_version is now first on PATH."
+		echo "export PATH=\"$bin_dir:\$PATH\""
+	fi
 	;;
 --install)
 	echo "git $installed_version is installed at $bin_dir"

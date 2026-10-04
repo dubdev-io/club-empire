@@ -14,10 +14,22 @@ error when it ignores them. Two things break silently:
 - **Config isolation does not hold.** The launcher sets `GIT_CONFIG_GLOBAL`
   and `GIT_CONFIG_SYSTEM` to `/dev/null`, which git reads only from 2.32.
 
-Put a git of 2.32 or newer first on PATH, and both faults go away:
+Put a git of 2.32 or newer on PATH behind the launcher, and both faults go away:
 
 ```bash
 eval "$(sh tools/paperclip-git.sh --activate)"
+git --version   # expect 2.50 or newer — plain `git push` now works
+```
+
+**The order on PATH matters.** The launcher's own `git` wrapper is what delivers
+the credentials, and it finds the real git on the PATH behind it, so the wrapper
+has to stay first. `--activate` does that for you. Do not prepend the new git by
+hand: that takes the wrapper out of the path of `git`, and the only symptom is
+`could not read Username` on your first push while `gh auth status` keeps
+reporting a healthy login. Written out, the line is
+
+```bash
+export PATH="$PAPERCLIP_GITHUB_LAUNCHER_DIR:$(sh tools/paperclip-git.sh --path):$PATH"
 ```
 
 It needs no root. On first use it unpacks the official git-core PPA build for
