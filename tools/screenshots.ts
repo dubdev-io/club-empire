@@ -414,6 +414,23 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 900,
   },
+  {
+    // The other end of 14 and 15, and the half the economy could not show me.
+    //
+    // A fresh club serves 0.50/s against 0.90/s arriving, so 44% of the door is
+    // turned away at second zero — a real queue, under the 50% share the Hud
+    // gates its banner on. The dead end at 14/15 is visible by reading the
+    // economy; this one was only visible by opening the sheet on a new save,
+    // which is why it needs a permanent shot rather than a test alone.
+    //
+    // No `drive` beyond opening the sheet on purpose: any purchase at all would
+    // stop being the first state a player sees.
+    name: '19-door-fresh',
+    note: 'DOOR sheet on a brand-new club — 44% turned away, advice given, no amber alarm',
+    seed: FRESH,
+    drive: `window.__clubStore.getState().openSheet('door');`,
+    settleMs: 700,
+  },
 ];
 
 // ---------------------------------------------------------------------------

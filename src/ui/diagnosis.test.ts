@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DOOR_MAX, MAX_LANES } from '../config/economy.ts';
+import { DOOR_MAX, MAX_LANES, QUEUE_WARNING_SHARE } from '../config/economy.ts';
 import {
   buyLane,
   createClubState,
@@ -50,47 +50,111 @@ describe('canAddLanes', () => {
 
 describe('the DOOR sheet queue diagnosis', () => {
   it('says nothing is queueing when nothing is', () => {
-    const d = doorDiagnosis(0, true, false);
+    const d = doorDiagnosis(0, 0.9, true, false);
 
     expect(d.warn).toBe(false);
     expect(line(d)).toBe('◦ No queue. Every guest who arrives gets served.');
   });
 
-  it('warns — and advises lanes — while a lane can still be bought', () => {
-    const d = doorDiagnosis(1.42, true, false);
+  it('warns — and advises lanes — once the overflow is most of the door', () => {
+    const d = doorDiagnosis(2.72, 3.22, true, false);
 
     expect(d.warn).toBe(true);
-    expect(line(d)).toBe('⚠ Queue — 1.42/s turned away. More lanes before more guests.');
+    expect(line(d)).toBe('⚠ Queue — 2.72/s turned away. More lanes before more guests.');
+  });
+
+  it('gives the same advice without the alarm below the warning share', () => {
+    // The fresh club: 0.40/s of 0.90/s is 44%, under the 50% the Hud and the
+    // DOOR badge both gate on. Same move, lower register.
+    const d = doorDiagnosis(0.4, 0.9, true, false);
+
+    expect(d.warn).toBe(false);
+    expect(d.glyph).not.toBe('⚠');
+    expect(line(d)).toBe('◦ 0.40/s walk past. More lanes before more guests.');
+  });
+
+  it('turns amber exactly at the threshold the other two surfaces use', () => {
+    // Pinned on the constant, not on 0.5, so retuning the economy moves all
+    // three surfaces together instead of leaving this one behind again.
+    const arrivals = 2;
+    const at = doorDiagnosis(arrivals * QUEUE_WARNING_SHARE, arrivals, true, false);
+    const under = doorDiagnosis(arrivals * QUEUE_WARNING_SHARE - 0.01, arrivals, true, false);
+
+    expect(at.warn).toBe(true);
+    expect(under.warn).toBe(false);
+  });
+
+  it('stays quiet when there is no door to take a share of', () => {
+    // The divide's guard. Not reachable from a single `ClubFlow`, where
+    // `turnedAway <= arrivals` holds by construction — but the sheet reads
+    // `turnedAway` and `arrivals` off two separately published store slices, so
+    // the pairing is a publish-order promise rather than an invariant. Pinned
+    // because the failure mode is silent: `0.4 / 0` is `Infinity`, which clears
+    // the share threshold and restores the exact fresh-club alarm DUB-13
+    // removed. Dropping `arrivals > 0` leaves every other test in this file
+    // green.
+    const d = doorDiagnosis(0.4, 0, true, false);
+
+    expect(d.warn).toBe(false);
+    expect(d.glyph).not.toBe('⚠');
   });
 
   it('points at levels, without a warning, once every lane is bought', () => {
-    const d = doorDiagnosis(0.058, false, false);
+    const d = doorDiagnosis(0.058, 3.225, false, false);
 
     expect(d.warn).toBe(false);
     expect(line(d)).toBe('◦ Full house — 0.06/s walk past. Levels are what pay now.');
   });
 
-  it('reads as finished when the club is complete', () => {
-    const d = doorDiagnosis(0.058, false, true);
+  it('reads as finished, not as a ceiling, when the club is complete', () => {
+    const d = doorDiagnosis(0.058, 3.225, false, true);
 
     expect(d.warn).toBe(false);
-    expect(line(d)).toBe('◦ Full house — 0.06/s walk past. The club is as big as it gets.');
+    expect(line(d)).toBe("◦ Full house — 0.06/s walk past. You've built it all.");
+    // The completion card promises a second venue in Phase 2. This line is read
+    // right after it, so it must not claim the game is out of room.
+    expect(d.body).not.toMatch(/as big as it gets/);
   });
 
   it('never shows ⚠ when no lane is purchasable, at any overflow rate', () => {
     for (const rate of [0.002, 0.058, 0.5, 3.2, 40]) {
-      const d = doorDiagnosis(rate, false, false);
+      const d = doorDiagnosis(rate, 3.225, false, false);
       expect(d.warn).toBe(false);
       expect(d.glyph).not.toBe('⚠');
     }
   });
 
-  it('keeps both dead-end strings inside the two-line box at 390 px', () => {
+  it('never shows ⚠ below the warning share, however big the raw rate', () => {
+    // The old gate was an absolute 0.001, so a large club turning away a small
+    // fraction of a large door read the same as a flood. Volume follows the
+    // share, never the magnitude.
+    for (const rate of [0.002, 0.058, 0.5, 3.2, 40]) {
+      const d = doorDiagnosis(rate, rate / (QUEUE_WARNING_SHARE / 2), true, false);
+      expect(d.warn).toBe(false);
+      expect(d.glyph).not.toBe('⚠');
+    }
+  });
+
+  it('keeps every advice string inside the two-line box at 390 px', () => {
     // Measured at 390x844: the diagnosis box fits 64 characters on two lines
     // before it pushes the buy button down. Guarding the length here is cheaper
     // than re-measuring a screenshot every time the copy is edited.
-    for (const complete of [false, true]) {
-      expect(line(doorDiagnosis(0.058, false, complete)).length).toBeLessThanOrEqual(64);
+    //
+    // The amber tier is in the sweep too, not just the neutral three. At 60
+    // characters it is the longest of the four — the only one carrying both a
+    // lead and a rate — so leaving it out tested every line except the one
+    // nearest the budget, with four characters of headroom. The rate is
+    // already at its widest here: the Lv 8 door cannot turn away more than
+    // 3.22/s, which is the same six characters as 2.72/s.
+    const strings = [
+      doorDiagnosis(2.72, 3.22, true, false),
+      doorDiagnosis(0.4, 0.9, true, false),
+      doorDiagnosis(0.058, 3.225, false, false),
+      doorDiagnosis(0.058, 3.225, false, true),
+    ];
+
+    for (const d of strings) {
+      expect(line(d).length).toBeLessThanOrEqual(64);
     }
   });
 });
@@ -218,5 +282,41 @@ describe('the state the dead-end copy exists for', () => {
     );
     expect(canAddLanes(views)).toBe(false);
     expect(club.derived.complete).toBe(false);
+  });
+});
+
+describe('the first state every player sees', () => {
+  /**
+   * The fresh club, straight out of `createClubState`, against the real
+   * economy.
+   *
+   * This is the state the second fix exists for, and the reason it is pinned
+   * against the simulation rather than a stub: the dead end at the end of the
+   * run is visible by reading the economy, but the nag at the start was only
+   * visible by opening the sheet on a new save. A stub would have let me pick
+   * the share that proves my own point. These numbers come from the config.
+   */
+  it('turns away 44% of the door — a real queue, but not an alarm', () => {
+    const club = createClubState();
+    const { arrivalsPerSecond, turnedAwayPerSecond } = club.derived.flow;
+
+    // §4.4: 0.90/s arriving against 0.50/s of one tap station at one lane.
+    expect(arrivalsPerSecond).toBeCloseTo(0.9, 3);
+    expect(turnedAwayPerSecond).toBeCloseTo(0.4, 3);
+
+    const share = turnedAwayPerSecond / arrivalsPerSecond;
+    expect(share).toBeGreaterThan(0);
+    expect(share).toBeLessThan(QUEUE_WARNING_SHARE);
+
+    // A lane is buyable here, so the advice is given — just not in amber, with
+    // the player holding £32 against a £60 upgrade.
+    const views = club.stations.map((st) =>
+      station(st.lanes < MAX_LANES ? 1 : null, st.unlocked ? null : 1),
+    );
+    expect(canAddLanes(views)).toBe(true);
+
+    const d = doorDiagnosis(turnedAwayPerSecond, arrivalsPerSecond, canAddLanes(views), false);
+    expect(d.warn).toBe(false);
+    expect(line(d)).toBe('◦ 0.40/s walk past. More lanes before more guests.');
   });
 });

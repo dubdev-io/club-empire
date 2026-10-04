@@ -1,3 +1,4 @@
+import { QUEUE_WARNING_SHARE } from '../config/economy.ts';
 import { formatGuestRate } from './format.ts';
 import type { StationView } from '../state/store.ts';
 
@@ -18,6 +19,10 @@ const QUEUE_EPSILON = 0.001;
  * **gate on purchasability, never on magnitude** — and `warn` is what carries
  * it, since it drives both the `⚠` and the `--warn` class. A warning the
  * player cannot act on is just anxiety.
+ *
+ * Purchasability decides whether the advice is *given*; it does not on its own
+ * decide whether the advice shouts. What a line says and how loudly it says it
+ * are two axes, so `warn` is gated on severity as well — see `doorDiagnosis`.
  */
 export interface Diagnosis {
   /** Drives both the `⚠` and the `--warn` class — they are never separated. */
@@ -31,14 +36,31 @@ export interface Diagnosis {
 /**
  * What to say about the guests who are not getting in (DUB-13).
  *
- * The old line was gated on magnitude alone, which made it advise "more lanes"
- * at full lane build-out — the one state where no lane can be bought. Door Lv 8
- * arrives at 3.225/s against 3.167/s of lane capacity, so 0.058/s is turned
- * away permanently; that residual is the economy, not a problem, and it is
- * reachable mid-run with every station still at Lv 7.
+ * Two bugs, at opposite ends of the same run, both from gating this line on one
+ * axis.
+ *
+ * The first was magnitude alone, which made it advise "more lanes" at full lane
+ * build-out — the one state where no lane can be bought. Door Lv 8 arrives at
+ * 3.225/s against 3.167/s of lane capacity, so 0.058/s is turned away
+ * permanently; that residual is the economy, not a problem, and it is reachable
+ * mid-run with every station still at Lv 7.
+ *
+ * Fixing that on purchasability alone left the opposite end lit: a **fresh
+ * club** serves 0.50/s against 0.90/s arriving, a lane is buyable, so the amber
+ * `⚠` was on screen at second zero telling a player with £32 to buy a £60
+ * upgrade. That is the scenario `QUEUE_WARNING_SHARE` was tuned to prevent, and
+ * the Hud and the DOOR badge both already honour it — this sheet was the one
+ * surface ignoring it, firing one identical alarm at 1.8%, 44% and 84%.
+ *
+ * So the two axes are separated: **purchasability decides the advice, severity
+ * decides the volume.** `share >= QUEUE_WARNING_SHARE` is the only thing that
+ * earns amber. The neutral tiers give the *same* advice in a lower register —
+ * the right move does not change with severity, only the urgency does, so
+ * "turned away" is the amber verb and "walk past" the neutral one.
  */
 export function doorDiagnosis(
   turnedAway: number,
+  arrivals: number,
   canAddLanes: boolean,
   complete: boolean,
 ): Diagnosis {
@@ -51,25 +73,53 @@ export function doorDiagnosis(
     };
   }
 
+  const rate = formatGuestRate(turnedAway);
+
   if (canAddLanes) {
-    return {
-      warn: true,
-      glyph: '⚠',
-      lead: 'Queue',
-      body: `${formatGuestRate(turnedAway)} turned away. More lanes before more guests.`,
-    };
+    // Load-bearing, and not for the reason it looks like. Inside one
+    // `ClubFlow` the divide is safe by construction — `turnedAway` is the
+    // undrained remainder of `arrivals`, so `turnedAway <= arrivals`
+    // identically — but the sheet never sees a `ClubFlow`. It reads two
+    // independently published store slices: `turnedAway` on the 10 Hz fast
+    // snapshot, `arrivals` on the purchase-time structural one, both
+    // defaulting to 0. What keeps them consistent is that `publishStructure`
+    // runs before `publishFast` at every call site, and that before the first
+    // structural publish `stations` is `[]` — so `canAddLanes` is false and
+    // this branch is unreachable. Reorder those publishes and `x / 0` is
+    // `Infinity`, not `NaN`, which is `>= QUEUE_WARNING_SHARE` and puts the
+    // fresh-club alarm straight back on screen. The guard is cheaper than the
+    // coupling.
+    const severe = arrivals > 0 && turnedAway / arrivals >= QUEUE_WARNING_SHARE;
+
+    return severe
+      ? {
+          warn: true,
+          glyph: '⚠',
+          lead: 'Queue',
+          body: `${rate} turned away. More lanes before more guests.`,
+        }
+      : {
+          // No lead: the amber tier's "Queue —" is what makes it read as an
+          // alarm, and an ordinary condition of play should not borrow it.
+          warn: false,
+          glyph: '◦',
+          lead: null,
+          body: `${rate} walk past. More lanes before more guests.`,
+        };
   }
 
   // Nothing left to widen. Name the state, then point at the only lever that
   // still does anything — or, at the end, say the club is finished. The last
   // line a player ever reads on this sheet is an achievement, not a 1.8%
-  // shortfall dressed up as a fault.
+  // shortfall dressed up as a fault, and not a ceiling either: the completion
+  // card it sits behind promises a second venue in Phase 2, so this line must
+  // not contradict it.
   return {
     warn: false,
     glyph: '◦',
     lead: 'Full house',
-    body: `${formatGuestRate(turnedAway)} walk past. ${
-      complete ? 'The club is as big as it gets.' : 'Levels are what pay now.'
+    body: `${rate} walk past. ${
+      complete ? "You've built it all." : 'Levels are what pay now.'
     }`,
   };
 }
