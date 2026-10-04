@@ -385,6 +385,35 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 900,
   },
+  {
+    // The completion card on the path a player actually takes to it. `buyAll`
+    // reaches the same state with no sheet open, which is exactly the case that
+    // cannot show the bug: the last purchase in the game is Booth lane 3, and it
+    // is bought from the BARS sheet. So this drive buys everything *except* that
+    // lane, opens the sheet, and buys it — leaving the card over the finished
+    // room rather than over a list of rows.
+    name: '18-complete-over-sheet',
+    note: 'club complete fired from the BARS sheet — the real last purchase, sheet dismissed',
+    seed: FRESH,
+    drive: `
+      const S = () => window.__clubStore.getState();
+      window.__club.grant(1e12);
+      S().actions.unlockStation('cocktail');
+      S().actions.unlockStation('booth');
+      for (let i = 0; i < 8; i++) S().actions.upgradeDoor();
+      for (const key of ['tap', 'cocktail', 'booth']) {
+        for (let i = 0; i < 30; i++) S().actions.upgradeStation(key);
+      }
+      for (const key of ['tap', 'cocktail']) {
+        for (let i = 0; i < 2; i++) S().actions.buyLane(key);
+      }
+      S().actions.buyLane('booth');
+      S().setStar(null);
+      S().openSheet('bars');
+      S().actions.buyLane('booth');
+    `,
+    settleMs: 900,
+  },
 ];
 
 // ---------------------------------------------------------------------------
