@@ -342,6 +342,78 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 900,
   },
+  {
+    // The same dead end one sheet over. Every lane bought with the stations at
+    // Lv 7, so all three cards are saturated with no lane left to buy — the
+    // state where the old line said "Add a lane" directly above a row reading
+    // "3 LANES". Reachable mid-run, which is why it is captured apart from the
+    // full build-out shot below.
+    name: '16-bars-dead-end',
+    note: 'BARS sheet dead end — every lane bought, levels mid-run, no lane left to advise',
+    seed: FRESH,
+    drive: `
+      const s = window.__clubStore.getState();
+      window.__club.grant(1e9);
+      s.actions.unlockStation('cocktail');
+      s.actions.unlockStation('booth');
+      for (const key of ['tap', 'cocktail', 'booth']) {
+        for (let i = 0; i < 2; i++) window.__clubStore.getState().actions.buyLane(key);
+      }
+      for (let i = 0; i < 8; i++) window.__clubStore.getState().actions.upgradeDoor();
+      for (const key of ['tap', 'cocktail', 'booth']) {
+        for (let i = 0; i < 6; i++) window.__clubStore.getState().actions.upgradeStation(key);
+      }
+      window.__clubStore.getState().setStar(null);
+      window.__clubStore.getState().openSheet('bars');
+    `,
+    settleMs: 900,
+  },
+  {
+    // Full build-out with the completion card dismissed: all three stations at
+    // Lv 30 with three lanes. This is the shot design review asked for by name,
+    // because it is the one state that proves the Bars sheet no longer puts
+    // three amber warnings behind the CLUB COMPLETE card.
+    name: '17-bars-full-buildout',
+    note: 'BARS sheet after club complete — three terminal cards, no ⚠ and no imperative',
+    seed: FRESH,
+    drive: `
+      window.__club.buyAll();
+      const s = window.__clubStore.getState();
+      s.setShowComplete(false);
+      s.setStar(null);
+      s.openSheet('bars');
+    `,
+    settleMs: 900,
+  },
+  {
+    // The completion card on the path a player actually takes to it. `buyAll`
+    // reaches the same state with no sheet open, which is exactly the case that
+    // cannot show the bug: the last purchase in the game is Booth lane 3, and it
+    // is bought from the BARS sheet. So this drive buys everything *except* that
+    // lane, opens the sheet, and buys it — leaving the card over the finished
+    // room rather than over a list of rows.
+    name: '18-complete-over-sheet',
+    note: 'club complete fired from the BARS sheet — the real last purchase, sheet dismissed',
+    seed: FRESH,
+    drive: `
+      const S = () => window.__clubStore.getState();
+      window.__club.grant(1e12);
+      S().actions.unlockStation('cocktail');
+      S().actions.unlockStation('booth');
+      for (let i = 0; i < 8; i++) S().actions.upgradeDoor();
+      for (const key of ['tap', 'cocktail', 'booth']) {
+        for (let i = 0; i < 30; i++) S().actions.upgradeStation(key);
+      }
+      for (const key of ['tap', 'cocktail']) {
+        for (let i = 0; i < 2; i++) S().actions.buyLane(key);
+      }
+      S().actions.buyLane('booth');
+      S().setStar(null);
+      S().openSheet('bars');
+      S().actions.buyLane('booth');
+    `,
+    settleMs: 900,
+  },
 ];
 
 // ---------------------------------------------------------------------------
