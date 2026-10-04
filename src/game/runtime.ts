@@ -167,6 +167,9 @@ export async function startGame(
   loop.restoreTicks(restoredTicks);
 
   // --- audio --------------------------------------------------------------
+  // Remembering the preference only. `setEnabled` no longer opens a context, so
+  // boot stays silent until the first tap reaches `unlock()` — which is the
+  // brief's "audio loads after first interaction" and the autoplay policy both.
   const audio = createAudio();
   audio.setEnabled(settings.audio);
 
@@ -459,6 +462,11 @@ export async function startGame(
     if (state.settings !== previous.settings) {
       settings = state.settings;
       audio.setEnabled(settings.audio);
+      // Settings only change from a tap on the sheet, so this subscriber runs
+      // inside the gesture — the one place other than the canvas that is
+      // allowed to open the context. Without it, turning sound on in a session
+      // that has never had a context would set the flag and stay silent.
+      if (settings.audio) audio.unlock();
       save();
     }
     if (state.reducedMotion !== previous.reducedMotion) {

@@ -12,7 +12,11 @@
  *  - **An `AudioContext` created before a user gesture starts suspended.** So
  *    the context is not created at boot at all; `unlock()` is called from the
  *    first pointer event. The brief already requires audio to load after first
- *    interaction, and the autoplay policy requires it independently.
+ *    interaction, and the autoplay policy requires it independently. This is
+ *    enforced in one place — the `unlocked` gate inside `ensure()` — rather than
+ *    trusted to every caller, because most callers are not gestures: the beat
+ *    comes off the tick loop and `setEnabled()` comes off boot and
+ *    `visibilitychange`.
  *  - **Scheduling must run ahead of the clock.** `setTimeout` jitter is
  *    audible on a bassline, so notes are scheduled against
  *    `AudioContext.currentTime`, which is sample-accurate.
@@ -67,6 +71,18 @@ export function createAudio(): GameAudio {
   let filter: BiquadFilterNode | null = null;
   let enabled = true;
   let boosted = false;
+  /**
+   * Has a user gesture happened yet? Only `unlock()` sets it, and `unlock()` is
+   * only ever called from a gesture handler.
+   *
+   * This is the gate, and it has to live here rather than at the call sites.
+   * `ensure()` is reached from eight places and most of them are *not* gestures:
+   * `beat()` fires off the fixed tick within the first second of boot, and
+   * `setEnabled()` is called on the boot path and on `visibilitychange`. Any one
+   * of them opening a context before the first tap breaks the brief's "audio
+   * loads after first interaction" and leaves the autoplay-policy path untested.
+   */
+  let unlocked = false;
 
   const ensure = (): boolean => {
     if (!enabled) return false;
@@ -75,6 +91,9 @@ export function createAudio(): GameAudio {
       if (ctx.state === 'suspended') void ctx.resume();
       return true;
     }
+    // Before the first gesture, silence. The beat the player cannot hear is not
+    // worth a context the browser would suspend anyway.
+    if (!unlocked) return false;
 
     try {
       ctx = new AudioContextCtor();
@@ -137,6 +156,7 @@ export function createAudio(): GameAudio {
 
   return {
     unlock: () => {
+      unlocked = true;
       ensure();
     },
 
@@ -149,6 +169,9 @@ export function createAudio(): GameAudio {
         master.gain.setTargetAtTime(next ? 0.22 : 0, ctx.currentTime, 0.02);
       }
       if (!next && ctx !== null && ctx.state === 'running') void ctx.suspend();
+      // Resumes an existing context, and is a no-op before the first gesture —
+      // `ensure()` refuses to construct until `unlock()` has run. So the boot
+      // path and `visibilitychange` can both call this freely.
       if (next) ensure();
     },
 
