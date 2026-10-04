@@ -29,6 +29,7 @@ import {
   currentMultiplier,
   progressOf,
   restoreClub,
+  shouldShowComplete,
   snapshotClub,
   takePendingStar,
   unlockStation,
@@ -335,7 +336,7 @@ export async function startGame(
       starTimer = window.setTimeout(() => store.getState().setStar(null), STAR_DISMISS_MS);
     }
 
-    if (club.derived.complete && !club.completeSeen) {
+    if (shouldShowComplete(club)) {
       store.getState().setShowComplete(true);
     }
   }
@@ -577,6 +578,15 @@ export async function startGame(
   // --- offline return on boot --------------------------------------------
   if (offlineLastSeenAt !== null) {
     applyTimeAway(offlineLastSeenAt);
+  }
+
+  // --- the payoff screen survives a reload --------------------------------
+  // `completeSeen` is only set when the player taps [KEEP PLAYING], and autosave
+  // persists the completed club long before that. So the same predicate the
+  // purchase path uses has to run on the restore path too, or finishing the club
+  // and reloading before tapping loses the payoff moment for good.
+  if (shouldShowComplete(club)) {
+    store.getState().setShowComplete(true);
   }
 
   publishStructure();
