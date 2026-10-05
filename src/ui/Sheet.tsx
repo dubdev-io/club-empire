@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { buyActivation } from './buyActivation.ts';
 import { ctaClassName } from './ctaClass.ts';
 
 /**
@@ -57,10 +58,16 @@ export function Sheet({ title, subtitle, onClose, children }: SheetProps): React
 /**
  * The primary action in a sheet: 56 px tall, full width minus two gutters.
  *
- * `onPointerDown`, not `onClick`: on mobile `click` fires up to ~300 ms after
- * the finger lands, and that delay is the whole difference between a button
- * that feels connected and one that feels dead. Criterion 2 is a 100 ms
- * budget — `click` alone can miss it on its own.
+ * The pointer buys on `onPointerDown`, not `onClick`: on mobile `click` fires
+ * up to ~300 ms after the finger lands, and that delay is the whole difference
+ * between a button that feels connected and one that feels dead. Criterion 2 is
+ * a 100 ms budget — `click` alone can miss it on its own.
+ *
+ * `onClick` is there as well, but only for the activation a pointer never
+ * makes: Enter and Space on a focused button produce a `click` and no
+ * `pointerdown`, so for a keyboard player the fast path above was no path at
+ * all (DUB-51). Which of the two events gets to spend money, and how a tap is
+ * kept from spending it twice, is `buyActivation.ts`.
  *
  * Unaffordable is signalled two ways, because §9 forbids colour alone: a lock
  * glyph before the price, and the price itself in `--ink-disabled`. The
@@ -111,9 +118,14 @@ export function BuyButton({
    * it in the same event, so the paint lands on the next frame either way.
    */
   const [pressed, setPressed] = useState(false);
-  const release = (): void => {
-    setPressed(false);
-  };
+
+  /*
+   * Which events may buy. A ref, not state: it is read and written inside the
+   * handlers and must never cause a render — see `buyActivation.ts` for what it
+   * means and why `pointerup` does not clear it.
+   */
+  const pointerServed = useRef(false);
+  const activation = buyActivation({ pointerServed, inactive, onBuy, setPressed });
 
   return (
     <button
@@ -130,22 +142,23 @@ export function BuyButton({
       // treatment instead (`.cta--pressed` in ui.css): the button shrinks, its
       // edge lights up where it used to dissolve into the card behind it, and
       // on a tap that buys nothing the price lights up with it. `onBuy` is
-      // still withheld.
+      // still withheld. A keypress on the same button reads the same, from the
+      // `:active` half of those rules, and is withheld the same way.
       aria-disabled={inactive}
-      onPointerDown={() => {
-        // Feedback first and unconditionally. The tap that buys nothing is
-        // exactly the one this button used to swallow.
-        setPressed(true);
-        if (!inactive) onBuy();
-      }}
-      onPointerUp={release}
+      onPointerDown={activation.pointerDown}
+      onPointerUp={activation.release}
       // A finger is implicitly captured by the element that got `pointerdown`,
       // so touch always delivers its `up` here. `pointercancel` covers the
       // gesture being taken over (a scroll starting), and `pointerleave` the
       // mouse, which is *not* captured: dragged off the button before release
       // it fires neither, and the class would stick.
-      onPointerCancel={release}
-      onPointerLeave={release}
+      onPointerCancel={activation.release}
+      onPointerLeave={activation.release}
+      // The keyboard's two events. `onKeyDown` buys nothing — it only tells the
+      // click handler that the click on its way is a keypress and not the tail
+      // of an earlier tap.
+      onKeyDown={activation.keyDown}
+      onClick={activation.click}
     >
       <span className="cta__label">{label}</span>
       {isDone ? (
