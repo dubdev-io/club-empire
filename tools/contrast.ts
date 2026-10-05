@@ -25,6 +25,9 @@
  *    a readiness poll can never be satisfied by the page being left behind;
  *  - every box is read twice `SETTLE_MS` apart and used only once the two reads
  *    agree, so a clip cannot land where the row used to be;
+ *  - every scene stamps the document it was set up on and every probe checks
+ *    the stamp, so a reload underneath a measurement re-drives the scene
+ *    instead of reporting the home screen's pixels as the badge's;
  *  - the glyph colour has to cover `glyphFloor` pixels, and the run prints how
  *    many it covered, so no single antialiased pixel can set a ratio.
  */
@@ -193,8 +196,72 @@ async function waitForBoot(cdp: Cdp, scene: string, timeoutMs = 60_000): Promise
   throw new Error(`the game did not boot within ${timeoutMs} ms for scene "${scene}"`);
 }
 
+/**
+ * The document was replaced while a scene was being measured.
+ *
+ * Not a failure of the thing under test, so it must not be reported as one —
+ * the scene has to be driven again instead.
+ */
+class SceneLost extends Error {}
+
+/**
+ * Mark the current document as the one this scene was set up on.
+ *
+ * Driving a scene and then measuring it assumes the page stays put in between,
+ * and on a **cold** dev server it does not: Vite discovers a dependency it has
+ * not pre-bundled, optimises it, and force-reloads the page. The club boots
+ * again from scratch with no sheet open, and every probe after that point is
+ * clipped against the home screen. It produced a confident `NO GLYPH` for the
+ * badge and a 2.26:1 FAIL for a 12.45:1 probe — the same authoritative-but-
+ * wrong number DUB-54 is about, from a different direction.
+ *
+ * A full reload replaces `window`, so a token on it is gone exactly when the
+ * scene is gone. That is a fact about the document rather than a guess about
+ * timing, which is the only kind of check worth having here.
+ */
+let nextToken = 1;
+
+async function stampScene(cdp: Cdp): Promise<number> {
+  const token = nextToken++;
+  await cdp.evaluate(`window.__clubScene = ${String(token)}; return true;`);
+  return token;
+}
+
+async function holdsScene(cdp: Cdp, token: number): Promise<boolean> {
+  return cdp
+    .evaluate<boolean>(`return window.__clubScene === ${String(token)};`)
+    .catch(() => false);
+}
+
+async function assertScene(cdp: Cdp, token: number, what: string): Promise<void> {
+  if (!(await holdsScene(cdp, token))) throw new SceneLost(`the page reloaded under ${what}`);
+}
+
+/**
+ * Load the page until it stays loaded.
+ *
+ * On a cold dev server the first load is where Vite pre-bundles the dependency
+ * graph and then force-reloads once, and it is much better to spend that reload
+ * here than inside the first scene. Same shape as `stableBox`: stamp the
+ * document and require the stamp to survive two checks `SETTLE_MS` apart, so
+ * "settled" is something observed rather than a sleep long enough to hope for.
+ */
+async function warmUp(cdp: Cdp, timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  await navigate(cdp, `${BASE_URL}/`);
+  while (Date.now() < deadline) {
+    await waitForBoot(cdp, 'warm-up');
+    const token = await stampScene(cdp);
+    await sleep(SETTLE_MS);
+    if (await holdsScene(cdp, token)) return;
+    // The optimiser reloaded us. Let the new document boot and check again.
+  }
+  throw new Error(`the page kept reloading for ${timeoutMs} ms; the dev server never settled`);
+}
+
 /** The painted colours over one element's box, at 4x for a clean glyph core. */
-async function measure(cdp: Cdp, selector: string): Promise<Sample | null> {
+async function measure(cdp: Cdp, selector: string, token: number): Promise<Sample | null> {
+  await assertScene(cdp, token, `the box read for ${selector}`);
   const box = await stableBox(cdp, selector);
   if (box === null) return null;
 
@@ -207,38 +274,38 @@ async function measure(cdp: Cdp, selector: string): Promise<Sample | null> {
       10_000,
     ),
   );
+  // Checked after as well as before: a reload between the box read and the
+  // capture is the window that produced the wrong pixels in the first place.
+  await assertScene(cdp, token, `the screenshot of ${selector}`);
   return sample(decodePng(Buffer.from(data, 'base64')));
 }
 
-async function main(): Promise<void> {
-  const cdp = await Cdp.connect(await pageTarget());
-  await cdp.send('Page.enable');
-  await cdp.send('Runtime.enable');
-  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
-
-  let failures = 0;
-
-  for (const viewport of VIEWPORTS) {
-    await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: viewport.width,
-      height: viewport.height,
-      deviceScaleFactor: viewport.scale,
-      mobile: viewport.mobile,
-    });
-
-    for (const scene of SCENES) {
+/**
+ * Drive one scene and measure every probe on it, re-driving if the page is
+ * replaced underneath.
+ *
+ * Nothing is printed until the whole scene has been measured on one document.
+ * A scene that is retried therefore reports once and cleanly, rather than
+ * leaving half a block of numbers taken from a page that no longer exists.
+ */
+async function measureScene(cdp: Cdp, scene: Scene, attempts = 3): Promise<number> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
       // Clear the save on the no-boot page first, then load the real one. A
       // scene that drives `buyAll()` writes that club to `localStorage` on
       // `pagehide`, and the next scene would load it: the BARS scene silently
       // became "everything already maxed", with no affordable row left to
       // compare against. Same ordering as `screenshots.ts`, for the same reason.
+      //
       // `navigate` does not return until the new document is the one
       // answering. Polling readiness without that barrier lets the *previous*
       // scene's booted page satisfy `window.__club !== undefined`, so the drive
       // script runs against a document that is about to be destroyed and the
       // whole scene is measured on a page nobody set up (DUB-54).
       await navigate(cdp, `${BASE_URL}/?noboot=1`);
-      await cdp.evaluate(`localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)}); return true;`);
+      await cdp.evaluate(
+        `localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)}); return true;`,
+      );
 
       await navigate(cdp, `${BASE_URL}/`);
       await waitForBoot(cdp, scene.name);
@@ -253,11 +320,47 @@ async function main(): Promise<void> {
         throw new Error(`the MAXED badge never settled for scene "${scene.name}"`);
       }
 
+      // Stamped after the scene is standing, so the token covers exactly the
+      // document the probes are about to be measured on.
+      const token = await stampScene(cdp);
+      const { failures, lines } = await report(cdp, scene.probes, token);
+      for (const line of lines) console.log(line);
+      return failures;
+    } catch (error) {
+      if (!(error instanceof SceneLost) || attempt >= attempts) throw error;
+      console.warn(
+        `  ${error.message} — driving "${scene.name}" again (${String(attempt)}/${String(attempts - 1)})`,
+      );
+    }
+  }
+}
+
+async function main(): Promise<void> {
+  const cdp = await Cdp.connect(await pageTarget());
+  await cdp.send('Page.enable');
+  await cdp.send('Runtime.enable');
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+
+  // Absorb the cold dev server's pre-bundle reload before measuring anything.
+  // The scene retry in `measureScene` is the correctness guarantee; this is
+  // what keeps it from having to fire on every cold run.
+  await warmUp(cdp);
+
+  let failures = 0;
+
+  for (const viewport of VIEWPORTS) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: viewport.scale,
+      mobile: viewport.mobile,
+    });
+
+    for (const scene of SCENES) {
       console.log(
         `\n${viewport.name}  ${viewport.width}x${viewport.height} @${viewport.scale}x  —  ${scene.name}`,
       );
-
-      failures += await report(cdp, scene.probes);
+      failures += await measureScene(cdp, scene);
     }
   }
 
@@ -269,13 +372,24 @@ async function main(): Promise<void> {
   console.log('\nEvery probe clears its AA floor.');
 }
 
-/** Measure each probe on the page as it stands, and return the failure count. */
-async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
+/**
+ * Measure each probe on the page as it stands.
+ *
+ * Returns the report rather than printing it, so `measureScene` can throw the
+ * whole block away and drive the scene again if the page is replaced partway
+ * through. Half a block of numbers from a dead document is worse than none.
+ */
+async function report(
+  cdp: Cdp,
+  probes: readonly Probe[],
+  token: number,
+): Promise<{ failures: number; lines: string[] }> {
   let failures = 0;
+  const lines: string[] = [];
   for (const probe of probes) {
-    const after = await measure(cdp, probe.selector);
+    const after = await measure(cdp, probe.selector, token);
     if (after === null) {
-      console.log(`  ${probe.name.padEnd(18)} NOT FOUND (${probe.selector})`);
+      lines.push(`  ${probe.name.padEnd(18)} NOT FOUND (${probe.selector})`);
       failures += 1;
       continue;
     }
@@ -283,7 +397,7 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
     if (after.textPixels === 0) {
       // No colour in the patch cleared the coverage floor, so there is nothing
       // to call the glyph. Reporting a ratio here would be inventing one.
-      console.log(
+      lines.push(
         `  ${probe.name.padEnd(18)} NO GLYPH over ${after.pixels} px ` +
           `(all of it ${hex(after.surface)}) — ${probe.selector}`,
       );
@@ -294,14 +408,14 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
     const ratio = contrast(after.text, after.surface);
     const verdict = ratio >= probe.floor ? 'PASS' : 'FAIL';
     if (ratio < probe.floor) failures += 1;
-    console.log(
+    lines.push(
       `  ${probe.name.padEnd(18)} ${ratio.toFixed(2).padStart(5)}:1  ` +
         `${hex(after.text)} on ${hex(after.surface)}  needs ${probe.floor.toFixed(1)}:1  ${verdict}`,
     );
-    console.log(
+    lines.push(
       `  ${''.padEnd(18)} glyph colour on ${after.textPixels} of ${after.pixels} sampled px`,
     );
-    console.log(`  ${''.padEnd(18)} ${probe.note}`);
+    lines.push(`  ${''.padEnd(18)} ${probe.note}`);
 
     if (probe.withoutClass !== undefined) {
       // Measured before: strip the class on the live element and look again.
@@ -319,9 +433,9 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
           `.${probe.withoutClass} `,
           '.cta[aria-disabled="true"] ',
         );
-        const before = await measure(cdp, bare);
+        const before = await measure(cdp, bare, token);
         if (before !== null && before.textPixels > 0) {
-          console.log(
+          lines.push(
             `  ${''.padEnd(18)} before (no .${probe.withoutClass}): ` +
               `${contrast(before.text, before.surface).toFixed(2)}:1  ` +
               `${hex(before.text)} on ${hex(before.surface)}  ` +
@@ -338,7 +452,7 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
       }
     }
   }
-  return failures;
+  return { failures, lines };
 }
 
 main().catch((error: unknown) => {
