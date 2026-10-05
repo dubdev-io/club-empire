@@ -181,6 +181,13 @@ const SHOTS: readonly Shot[] = [
     note: 'boot / loading — club silhouette, spinner, progress bar',
     seed: FRESH,
     drive: `window.__clubStore.getState().setBooting(true, 0.45);`,
+    // Past the 1 s reveal (DUB-21), or the shot has no progress bar in it — the
+    // bar is in the tree from the first frame but transparent until the load has
+    // taken a second, and the default 400 ms landed inside that. The driver's
+    // own load is fast, so the capture has to wait the threshold out — 1400 ms
+    // rather than 1200 because the reveal ends at 1200 ms of *page* time and the
+    // sleep starts whenever the store turned up, which is not the navigation.
+    settleMs: 1400,
   },
   {
     name: '02-first-run',
