@@ -771,6 +771,12 @@
  * mouse and keyboard path and carries the `.cta` buttons built by hand
  * elsewhere (settings, the offline-return card).
  *
+ * "The keyboard path" is a claim about this treatment only, not about what the
+ * button then does: `:active` is held for the length of a Space press whatever
+ * the button is wired to, and for a while that was a confident press on a
+ * purchase that never happened (DUB-51). `buyActivation.ts` is what makes the
+ * keypress buy; this rule is only what makes it look like it did.
+ *
  * No transition, in or out — same reason as `.bar-button:active`. A tween
  * between the tap and the response is the latency players read as
  * "unresponsive".
