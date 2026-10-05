@@ -716,6 +716,36 @@
   opacity: 0.55;
 }
 
+/* A maxed row opts out of the button-level dim (DUB-42).
+ *
+ * `opacity` applies to the whole subtree and a child can never be *more* opaque
+ * than its parent. So while the dim sits on the button, the gold badge inside it
+ * composites to 4.31:1 against --bg-surface — under the 4.5:1 AA floor for
+ * 14px/600 text. The badge is the reward the player earned, and it is the one
+ * part of an inert row that still has to read.
+ *
+ * So the dim moves off the button and onto the label, which is the part that
+ * should dim. The label keeps exactly the 0.55 it had, so the row still reads as
+ * inert beside a live one; the badge goes to full --gold-vip, 11.7:1. Every
+ * other aria-disabled control keeps the rule above, untouched.
+ *
+ * Undimming the button also undims its own fill and border, which are not text
+ * and have no AA floor. Measured on the live page rather than assumed, because
+ * both depend on what is behind the row: on the BARS card (--bg-raised behind)
+ * the fill goes #1c192f -> #171527 and the border does not move at all; in the
+ * DOOR sheet (--bg-surface behind) the fill does not move and the border goes
+ * #1d1a30 -> #231f3a. Six parts in 255 at the worst, on a surface — small enough
+ * that pre-compositing them back would cost more than it buys, and it cannot be
+ * done in one declaration anyway when the backdrop differs per sheet.
+ */
+.cta--maxed[aria-disabled='true'] {
+  opacity: 1;
+}
+
+.cta--maxed[aria-disabled='true'] .cta__label {
+  opacity: 0.55;
+}
+
 .cta__label {
   text-align: left;
 }
