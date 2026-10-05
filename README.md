@@ -53,6 +53,7 @@ node tools/autobuy.ts --tap   # ...with a player collecting every bubble
 
 npm run shots            # all ten states at 390x844 and 1440x900
 npm run measure:frames   # per-system frame time at the §11 entity ceiling
+npm run measure:contrast # WCAG ratios off the painted pixels, not the stylesheet
 ```
 
 `sim:economy` and `sim:autobuy` read the same table from `src/config/pacing.ts`.
@@ -61,8 +62,14 @@ the real purchase functions — so a divergence between the signed-off model and
 the shipping game shows up as two different sets of numbers rather than as two
 tools that both pass.
 
-`shots` and `measure:frames` need a dev server and a headless Chrome with remote
-debugging:
+`measure:contrast` reads the colours Chrome actually painted over each probe's
+box and reports the WCAG ratio, with the before figure from the same run. A ratio
+worked out from `tokens.css` misses whatever an ancestor `opacity` did to the
+text: that is how the MAXED badge came to be quoted at 3.13:1 when it rendered at
+4.31:1 (DUB-42).
+
+`shots`, `measure:frames` and `measure:contrast` need a dev server and a headless
+Chrome with remote debugging:
 
 ```bash
 npm run dev &

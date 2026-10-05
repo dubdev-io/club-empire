@@ -91,7 +91,12 @@ export function BuyButton({
   return (
     <button
       type="button"
-      className={`cta cta--${accent}${affordable && !inactive ? ' cta--affordable' : ''}`}
+      // `cta--maxed` is what lets the gold badge stay readable: the disabled
+      // dim cannot sit on a button that contains a child which must clear
+      // 4.5:1, so that row dims its label instead. See `.cta--maxed` in ui.css.
+      className={`cta cta--${accent}${affordable && !inactive ? ' cta--affordable' : ''}${
+        isDone ? ' cta--maxed' : ''
+      }`}
       // Not `disabled`: an unaffordable button that cannot be pressed gives no
       // feedback at all, and §9 requires every tap to produce a visible
       // change. Pressing it flashes the price instead, which tells the player
