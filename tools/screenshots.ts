@@ -118,6 +118,59 @@ class Cdp {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The keyboard
+// ---------------------------------------------------------------------------
+
+/**
+ * A real key, delivered through the browser's own input pipeline.
+ *
+ * It has to be `Input.dispatchKeyEvent` and not a `KeyboardEvent` built in the
+ * page: a synthetic event does not move focus, and the whole point of the focus
+ * shots is where focus *went*. It also matters for `:focus-visible`, which
+ * Chrome grants on a keyboard-driven focus change and withholds from a bare
+ * programmatic `.focus()` — so a harness that cheated with `.focus()` would
+ * photograph a state the player never sees.
+ */
+const KEYS = {
+  Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+  Space: { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
+} as const;
+
+async function key(cdp: Cdp, name: keyof typeof KEYS, type: 'keyDown' | 'keyUp'): Promise<void> {
+  const spec = KEYS[name];
+  await cdp.send('Input.dispatchKeyEvent', {
+    type,
+    key: spec.key,
+    code: spec.code,
+    windowsVirtualKeyCode: spec.keyCode,
+    nativeVirtualKeyCode: spec.keyCode,
+    ...('text' in spec && type === 'keyDown' ? { text: spec.text } : {}),
+  });
+}
+
+/**
+ * Press Tab until `document.activeElement` satisfies `predicate`.
+ *
+ * A fixed Tab count would be a hostage to document order — one banner showing
+ * and the count is wrong, and the shot silently photographs the wrong button.
+ * Walking the real tab ring and checking where it landed is both robust and the
+ * verification the ticket asks for: if the ring never reaches the control, this
+ * throws instead of producing a screenshot nobody looks twice at.
+ */
+async function tabTo(cdp: Cdp, predicate: string, limit = 40): Promise<void> {
+  for (let press = 0; press < limit; press += 1) {
+    await key(cdp, 'Tab', 'keyDown');
+    await key(cdp, 'Tab', 'keyUp');
+    await sleep(30);
+    const arrived = await cdp.evaluate<boolean>(
+      `const el = document.activeElement; return Boolean(el) && Boolean(${predicate});`,
+    );
+    if (arrived) return;
+  }
+  throw new Error(`Tab never reached an element matching ${predicate} in ${limit} presses`);
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---------------------------------------------------------------------------
@@ -133,6 +186,18 @@ interface Shot {
   /** Run after the game has booted. */
   readonly drive?: string;
   readonly reducedMotion?: boolean;
+  /**
+   * Walk the real tab ring until `document.activeElement` satisfies this
+   * expression (`el` is bound to it). Run after `drive`, before the capture.
+   */
+  readonly tabTo?: string;
+  /**
+   * Hold a key down — never released — once focus has arrived. `Space` on a
+   * focused `<button>` is the keyboard's press: Chrome sets `:active` on the
+   * key *down* and only fires `click` on the way up, so the held state survives
+   * the capture without the purchase going through.
+   */
+  readonly hold?: 'Space';
   /** Extra settle time, for states with an animation worth catching. */
   readonly settleMs?: number;
 }
@@ -504,6 +569,48 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 1200,
   },
+  {
+    // 23/24 are the focus pair (DUB-50), and they are a pair for the same
+    // reason 20/21 are: the claim is not "a ring exists", it is "the ring and
+    // the press are two states a player can tell apart while in both at once".
+    //
+    // Reached by Tab, never by `.focus()`. Chrome grants `:focus-visible` on a
+    // keyboard-driven focus change and withholds it from a programmatic focus,
+    // so a harness that called `.focus()` would photograph a ring the player
+    // never gets — and would keep passing if the rule were changed to the
+    // `:focus` that leaves a ring on whatever a mouse last clicked.
+    name: '23-cta-focused',
+    note: 'BARS sheet, a buy button reached with Tab — the outset focus ring on the card (DUB-50)',
+    seed: FRESH,
+    drive: `
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      s.openSheet('bars');
+    `,
+    tabTo: `el.classList.contains('cta') && (el.querySelector('.cta__label')?.textContent ?? '').startsWith('+ Lane')`,
+    settleMs: 400,
+  },
+  {
+    // The collision check. Space held on the focused button puts it in both
+    // states: `:focus-visible` draws the outset ring, `:active` draws DUB-38's
+    // inset one plus the price flash. What has to be visible here is the gap of
+    // card colour between them — two rings, not one thick white band.
+    //
+    // `+ Lane` at £400 on a fresh club, so it is the dead-end press that owns
+    // the ring. Space fires `click` on the way *up* and is never released, so
+    // nothing is bought.
+    name: '24-cta-focused-pressed',
+    note: 'the same button focused and held with Space — the outset focus ring outside DUB-38’s inset press ring',
+    seed: FRESH,
+    drive: `
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      s.openSheet('bars');
+    `,
+    tabTo: `el.classList.contains('cta') && (el.querySelector('.cta__label')?.textContent ?? '').startsWith('+ Lane')`,
+    hold: 'Space',
+    settleMs: 400,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -591,6 +698,14 @@ async function main(): Promise<void> {
 
       if (shot.drive !== undefined) await cdp.evaluate(`${shot.drive} return true;`);
       await sleep(shot.settleMs ?? 400);
+
+      // Keyboard last, and after the settle: the sheet has to be committed and
+      // its animation finished before the tab ring means anything.
+      if (shot.tabTo !== undefined) await tabTo(cdp, shot.tabTo);
+      if (shot.hold !== undefined) {
+        await key(cdp, shot.hold, 'keyDown');
+        await sleep(80);
+      }
 
       const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
         format: 'png',
