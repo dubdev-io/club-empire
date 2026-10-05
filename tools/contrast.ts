@@ -16,11 +16,23 @@
  * It reports the **before** figure in the same run, by removing the class under
  * test from the live element and measuring again. One run, both numbers, same
  * browser, same font rasterisation.
+ *
+ * A measurement harness that reports a wrong number is worse than no harness,
+ * because the number carries authority. So three things here are deliberately
+ * paranoid rather than merely convenient (DUB-54):
+ *
+ *  - every navigation waits for the *new* document to be the one answering, so
+ *    a readiness poll can never be satisfied by the page being left behind;
+ *  - every box is read twice `SETTLE_MS` apart and used only once the two reads
+ *    agree, so a clip cannot land where the row used to be;
+ *  - the glyph colour has to cover `glyphFloor` pixels, and the run prints how
+ *    many it covered, so no single antialiased pixel can set a ratio.
  */
 
-import { inflateSync } from 'node:zlib';
 import { SAVE_STORAGE_KEY } from '../src/save/schema.ts';
-import { Cdp, pageTarget, sleep } from './cdp.ts';
+import { Cdp, navigate, pageTarget, retry, sleep } from './cdp.ts';
+import type { Sample } from './pixels.ts';
+import { contrast, decodePng, hex, sample } from './pixels.ts';
 
 const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:5173';
 
@@ -104,176 +116,6 @@ const SCENES: readonly Scene[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// A PNG reader, because CDP hands back a PNG and we need the pixels
-// ---------------------------------------------------------------------------
-
-interface Bitmap {
-  readonly width: number;
-  readonly height: number;
-  /** RGB triplets, row-major, alpha dropped — a screenshot is already flat. */
-  readonly rgb: Uint8Array;
-}
-
-/** Decode a non-interlaced 8-bit RGB/RGBA PNG. That is all Chrome emits here. */
-function decodePng(png: Buffer): Bitmap {
-  if (png.readUInt32BE(0) !== 0x89504e47) throw new Error('not a PNG');
-
-  let width = 0;
-  let height = 0;
-  let channels = 0;
-  const idat: Buffer[] = [];
-
-  for (let at = 8; at + 8 <= png.length;) {
-    const length = png.readUInt32BE(at);
-    const type = png.toString('ascii', at + 4, at + 8);
-    const body = png.subarray(at + 8, at + 8 + length);
-    at += 12 + length; // length + type + data + CRC
-
-    if (type === 'IHDR') {
-      width = body.readUInt32BE(0);
-      height = body.readUInt32BE(4);
-      const depth = body[8];
-      const colourType = body[9];
-      const interlace = body[12];
-      if (depth !== 8 || interlace !== 0 || (colourType !== 2 && colourType !== 6)) {
-        throw new Error(
-          `unsupported PNG: depth ${depth}, colour type ${colourType}, interlace ${interlace}`,
-        );
-      }
-      channels = colourType === 6 ? 4 : 3;
-    } else if (type === 'IDAT') {
-      idat.push(body);
-    } else if (type === 'IEND') {
-      break;
-    }
-  }
-
-  const raw = inflateSync(Buffer.concat(idat));
-  const stride = width * channels;
-  const out = new Uint8Array(width * height * 3);
-  // One scanline of reconstructed bytes, kept for the Up/Average/Paeth filters.
-  let previous = new Uint8Array(stride);
-  let current = new Uint8Array(stride);
-
-  for (let y = 0; y < height; y += 1) {
-    const filter = raw[y * (stride + 1)];
-    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
-
-    for (let i = 0; i < stride; i += 1) {
-      const x = line[i]!;
-      const a = i >= channels ? current[i - channels]! : 0;
-      const b = previous[i]!;
-      const c = i >= channels ? previous[i - channels]! : 0;
-      let value: number;
-      switch (filter) {
-        case 0:
-          value = x;
-          break;
-        case 1:
-          value = x + a;
-          break;
-        case 2:
-          value = x + b;
-          break;
-        case 3:
-          value = x + ((a + b) >> 1);
-          break;
-        case 4: {
-          const p = a + b - c;
-          const pa = Math.abs(p - a);
-          const pb = Math.abs(p - b);
-          const pc = Math.abs(p - c);
-          value = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
-          break;
-        }
-        default:
-          throw new Error(`unknown PNG filter ${String(filter)}`);
-      }
-      current[i] = value & 0xff;
-    }
-
-    for (let x = 0; x < width; x += 1) {
-      const from = x * channels;
-      const to = (y * width + x) * 3;
-      out[to] = current[from]!;
-      out[to + 1] = current[from + 1]!;
-      out[to + 2] = current[from + 2]!;
-    }
-
-    const swap = previous;
-    previous = current;
-    current = swap;
-  }
-
-  return { width, height, rgb: out };
-}
-
-// ---------------------------------------------------------------------------
-// WCAG
-// ---------------------------------------------------------------------------
-
-type Rgb = readonly [number, number, number];
-
-/** WCAG 2.x relative luminance of an 8-bit sRGB triplet. */
-function luminance([r, g, b]: Rgb): number {
-  const channel = (v: number): number => {
-    const s = v / 255;
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-}
-
-function contrast(a: Rgb, b: Rgb): number {
-  const la = luminance(a);
-  const lb = luminance(b);
-  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
-}
-
-const hex = ([r, g, b]: Rgb): string =>
-  `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')}`;
-
-/**
- * Pick the glyph colour and the surface colour out of a patch of text.
- *
- * The surface is the most common pixel: a text box is mostly background. The
- * glyph is the pixel furthest from it in luminance — the interior of a stem,
- * where antialiasing has not diluted the colour. Taking the extreme rather than
- * an average is deliberate: WCAG asks about the text colour as specified, and
- * an average over a glyph's soft edge would flatter every ratio.
- */
-function sample(bitmap: Bitmap): { text: Rgb; surface: Rgb; pixels: number } {
-  const counts = new Map<number, number>();
-  for (let i = 0; i < bitmap.rgb.length; i += 3) {
-    const key = (bitmap.rgb[i]! << 16) | (bitmap.rgb[i + 1]! << 8) | bitmap.rgb[i + 2]!;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-
-  let surfaceKey = 0;
-  let best = -1;
-  for (const [key, count] of counts) {
-    if (count > best) {
-      best = count;
-      surfaceKey = key;
-    }
-  }
-  const surface: Rgb = [(surfaceKey >> 16) & 0xff, (surfaceKey >> 8) & 0xff, surfaceKey & 0xff];
-  const surfaceLuminance = luminance(surface);
-
-  let text = surface;
-  let furthest = 0;
-  for (const key of counts.keys()) {
-    const pixel: Rgb = [(key >> 16) & 0xff, (key >> 8) & 0xff, key & 0xff];
-    const distance = Math.abs(luminance(pixel) - surfaceLuminance);
-    if (distance > furthest) {
-      furthest = distance;
-      text = pixel;
-    }
-  }
-
-  return { text, surface, pixels: bitmap.width * bitmap.height };
-}
-
-// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
@@ -284,25 +126,87 @@ interface Box {
   height: number;
 }
 
+/** How far apart the two agreeing reads of a box have to be. */
+const SETTLE_MS = 500;
+
+/** One read of an element's box, or null if it is absent or has no area. */
+async function readBox(cdp: Cdp, selector: string): Promise<Box | null> {
+  return cdp
+    .evaluate<Box | null>(`
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (el === null) return null;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return null;
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    `)
+    .catch(() => null);
+}
+
+const sameBox = (a: Box, b: Box): boolean =>
+  a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+
+/**
+ * An element's box, once it has stopped moving.
+ *
+ * A non-zero width is not a settled layout. The sheet animates in, so the box
+ * can be read at one position and the screenshot clipped after the row has
+ * moved — and the clip then lands on whatever is now under those coordinates.
+ * That is DUB-54: the badge probe clipped the `+ Lane 2` button one row below
+ * and reported 1.00:1 cyan-on-cyan for a probe that measures 11.68:1.
+ *
+ * So require two reads `SETTLE_MS` apart to agree before trusting either. No
+ * flat sleep can do this job: 300 ms is too short for the ★ celebration to
+ * clear the sheet at 390x844 and wasted time once it has.
+ */
+async function stableBox(cdp: Cdp, selector: string, timeoutMs = 15_000): Promise<Box | null> {
+  const deadline = Date.now() + timeoutMs;
+  let previous = await readBox(cdp, selector);
+  while (Date.now() < deadline) {
+    await sleep(SETTLE_MS);
+    const current = await readBox(cdp, selector);
+    if (current !== null && previous !== null && sameBox(previous, current)) return current;
+    previous = current;
+  }
+  return null;
+}
+
+/**
+ * Wait until the game has booted on the current document.
+ *
+ * Generous on purpose. The first scene of a run loads a **cold** dev server,
+ * so Vite is transforming the module graph on demand while Chrome is bringing
+ * up a software WebGL context and generating every texture; `window.__club`
+ * only exists once `startGame` has resolved past all of that. A 6 s budget
+ * measured the second and later scenes fine and lost the first one outright.
+ * The deadline is here to produce a clear error, not to bound a healthy run —
+ * a warm scene gets past it in well under a second.
+ */
+async function waitForBoot(cdp: Cdp, scene: string, timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const booted = await cdp
+      .evaluate<boolean>('return Boolean(window.__clubStore) && Boolean(window.__club);')
+      .catch(() => false);
+    if (booted) return;
+    await sleep(100);
+  }
+  throw new Error(`the game did not boot within ${timeoutMs} ms for scene "${scene}"`);
+}
+
 /** The painted colours over one element's box, at 4x for a clean glyph core. */
-async function measure(
-  cdp: Cdp,
-  selector: string,
-): Promise<{ text: Rgb; surface: Rgb; pixels: number } | null> {
-  const box = await cdp.evaluate<Box | null>(`
-    const el = document.querySelector(${JSON.stringify(selector)});
-    if (el === null) return null;
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return null;
-    return { x: r.x, y: r.y, width: r.width, height: r.height };
-  `);
+async function measure(cdp: Cdp, selector: string): Promise<Sample | null> {
+  const box = await stableBox(cdp, selector);
   if (box === null) return null;
 
-  const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
-    format: 'png',
-    captureBeyondViewport: false,
-    clip: { ...box, scale: 4 },
-  });
+  // 10 s rather than the client's 30 s default: a stalled capture is stalled
+  // on the first frame, and the retry is the thing that recovers it.
+  const { data } = await retry(`screenshot of ${selector}`, () =>
+    cdp.send<{ data: string }>(
+      'Page.captureScreenshot',
+      { format: 'png', captureBeyondViewport: false, clip: { ...box, scale: 4 } },
+      10_000,
+    ),
+  );
   return sample(decodePng(Buffer.from(data, 'base64')));
 }
 
@@ -328,35 +232,26 @@ async function main(): Promise<void> {
       // `pagehide`, and the next scene would load it: the BARS scene silently
       // became "everything already maxed", with no affordable row left to
       // compare against. Same ordering as `screenshots.ts`, for the same reason.
-      await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
-      await sleep(400);
+      // `navigate` does not return until the new document is the one
+      // answering. Polling readiness without that barrier lets the *previous*
+      // scene's booted page satisfy `window.__club !== undefined`, so the drive
+      // script runs against a document that is about to be destroyed and the
+      // whole scene is measured on a page nobody set up (DUB-54).
+      await navigate(cdp, `${BASE_URL}/?noboot=1`);
       await cdp.evaluate(`localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)}); return true;`);
 
-      await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        await sleep(100);
-        const ready = await cdp
-          .evaluate<boolean>('return Boolean(window.__clubStore) && Boolean(window.__club);')
-          .catch(() => false);
-        if (ready) break;
-      }
+      await navigate(cdp, `${BASE_URL}/`);
+      await waitForBoot(cdp, scene.name);
       await cdp.evaluate(`${scene.drive} return true;`);
 
-      // Wait for the row rather than for a fixed delay. `buyAll()` fires the ★
-      // celebration, and how long that takes to clear the sheet is not something
-      // to guess at: a 900 ms sleep measured the DOOR sheet correctly at
-      // 1440x900 and found nothing at all at 390x844.
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        await sleep(100);
-        const shown = await cdp
-          .evaluate<boolean>(
-            `const el = document.querySelector('.cta--maxed .cta__done');
-             return el !== null && el.getBoundingClientRect().width > 0;`,
-          )
-          .catch(() => false);
-        if (shown) break;
+      // Wait for the badge row to stop moving, not merely to exist. `buyAll()`
+      // fires the ★ celebration and the sheet animates in behind it; how long
+      // that takes is not something to guess at — a 900 ms sleep measured the
+      // DOOR sheet correctly at 1440x900 and found nothing at all at 390x844,
+      // and a 300 ms one read the box mid-animation.
+      if ((await stableBox(cdp, BADGE.selector)) === null) {
+        throw new Error(`the MAXED badge never settled for scene "${scene.name}"`);
       }
-      await sleep(300);
 
       console.log(
         `\n${viewport.name}  ${viewport.width}x${viewport.height} @${viewport.scale}x  —  ${scene.name}`,
@@ -385,12 +280,26 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
       continue;
     }
 
+    if (after.textPixels === 0) {
+      // No colour in the patch cleared the coverage floor, so there is nothing
+      // to call the glyph. Reporting a ratio here would be inventing one.
+      console.log(
+        `  ${probe.name.padEnd(18)} NO GLYPH over ${after.pixels} px ` +
+          `(all of it ${hex(after.surface)}) — ${probe.selector}`,
+      );
+      failures += 1;
+      continue;
+    }
+
     const ratio = contrast(after.text, after.surface);
     const verdict = ratio >= probe.floor ? 'PASS' : 'FAIL';
     if (ratio < probe.floor) failures += 1;
     console.log(
       `  ${probe.name.padEnd(18)} ${ratio.toFixed(2).padStart(5)}:1  ` +
         `${hex(after.text)} on ${hex(after.surface)}  needs ${probe.floor.toFixed(1)}:1  ${verdict}`,
+    );
+    console.log(
+      `  ${''.padEnd(18)} glyph colour on ${after.textPixels} of ${after.pixels} sampled px`,
     );
     console.log(`  ${''.padEnd(18)} ${probe.note}`);
 
@@ -411,11 +320,12 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
           '.cta[aria-disabled="true"] ',
         );
         const before = await measure(cdp, bare);
-        if (before !== null) {
+        if (before !== null && before.textPixels > 0) {
           console.log(
             `  ${''.padEnd(18)} before (no .${probe.withoutClass}): ` +
               `${contrast(before.text, before.surface).toFixed(2)}:1  ` +
-              `${hex(before.text)} on ${hex(before.surface)}`,
+              `${hex(before.text)} on ${hex(before.surface)}  ` +
+              `(${before.textPixels} of ${before.pixels} px)`,
           );
         }
         await cdp.evaluate(`

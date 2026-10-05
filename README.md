@@ -68,6 +68,17 @@ worked out from `tokens.css` misses whatever an ancestor `opacity` did to the
 text: that is how the MAXED badge came to be quoted at 3.13:1 when it rendered at
 4.31:1 (DUB-42).
 
+It has to give the same answer every run, because a measurement that is wrong
+once is worse than no measurement — the number carries authority and someone
+acts on it. So it waits for each navigation to actually replace the document,
+takes a box only once two reads 500 ms apart agree, requires the glyph colour to
+cover a floor of the sampled pixels and prints how many it covered, and retries
+a stalled `Page.captureScreenshot`. Before that it could read the badge box
+mid-animation, clip the row below it, and report 1.00:1 for a probe that
+measures 11.68:1 (DUB-54). The pure half of that arithmetic is pinned in
+`tools/pixels.test.ts`; the browser half is verified by running the tool
+repeatedly from a cold dev server and a cold Chrome.
+
 `shots`, `measure:frames` and `measure:contrast` need a dev server and a headless
 Chrome with remote debugging:
 
