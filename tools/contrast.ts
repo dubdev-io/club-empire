@@ -132,15 +132,56 @@ interface Box {
 /** How far apart the two agreeing reads of a box have to be. */
 const SETTLE_MS = 500;
 
-/** One read of an element's box, or null if it is absent or has no area. */
-async function readBox(cdp: Cdp, selector: string): Promise<Box | null> {
+/**
+ * Scroll a probe into view inside whatever is scrolling it.
+ *
+ * `.sheet__body` is `overflow-y: auto`, so a row can sit outside the sheet's
+ * visible area while `getBoundingClientRect()` still reports a perfectly
+ * ordinary position for it — one that the ancestor has clipped away. The pixels
+ * at those coordinates belong to whatever *is* painted there. That is how the
+ * badge probe came back as the cyan `+ Lane 2` fill a row below (DUB-54), and
+ * no amount of waiting fixes it: the wrong box is completely stable.
+ */
+async function scrollIntoView(cdp: Cdp, selector: string): Promise<void> {
+  await cdp
+    .evaluate(`
+      document
+        .querySelector(${JSON.stringify(selector)})
+        ?.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      return true;
+    `)
+    .catch(() => null);
+}
+
+/**
+ * One read of an element's box, plus whether the element is what is actually
+ * painted there.
+ *
+ * The hit test is the part that matters. `document.elementFromPoint` answers
+ * the only question a pixel-measurement tool really has — "do the pixels at
+ * these coordinates belong to my probe?" — and it answers it against the same
+ * composited, clipped, stacking-ordered reality the screenshot will sample. A
+ * rect alone cannot: it survives being scrolled out of an `overflow` ancestor,
+ * being covered by an overlay, and being `clip-path`ed away.
+ */
+async function readBox(cdp: Cdp, selector: string): Promise<{ box: Box; painted: boolean } | null> {
   return cdp
-    .evaluate<Box | null>(`
+    .evaluate<{ box: Box; painted: boolean } | null>(`
       const el = document.querySelector(${JSON.stringify(selector)});
       if (el === null) return null;
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) return null;
-      return { x: r.x, y: r.y, width: r.width, height: r.height };
+
+      // Centre of the box, which is inside a glyph's row rather than on the
+      // boundary where a rounding difference would pick the neighbour.
+      const x = r.x + r.width / 2;
+      const y = r.y + r.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      // The probe itself, or the span the text actually lives in: either way
+      // the pixels at the centre belong to this element's subtree.
+      const painted = hit !== null && (el === hit || el.contains(hit) || hit.contains(el));
+
+      return { box: { x: r.x, y: r.y, width: r.width, height: r.height }, painted };
     `)
     .catch(() => null);
 }
@@ -149,25 +190,36 @@ const sameBox = (a: Box, b: Box): boolean =>
   a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 
 /**
- * An element's box, once it has stopped moving.
+ * An element's box, once it has stopped moving and is genuinely on screen.
  *
- * A non-zero width is not a settled layout. The sheet animates in, so the box
- * can be read at one position and the screenshot clipped after the row has
- * moved — and the clip then lands on whatever is now under those coordinates.
- * That is DUB-54: the badge probe clipped the `+ Lane 2` button one row below
- * and reported 1.00:1 cyan-on-cyan for a probe that measures 11.68:1.
+ * Two independent things have to hold before a clip is worth taking.
  *
- * So require two reads `SETTLE_MS` apart to agree before trusting either. No
- * flat sleep can do this job: 300 ms is too short for the ★ celebration to
- * clear the sheet at 390x844 and wasted time once it has.
+ * It has to have stopped moving: a non-zero width is not a settled layout, and
+ * the sheet animates in, so the box can be read at one position and the
+ * screenshot clipped after the row has moved. Two reads `SETTLE_MS` apart have
+ * to agree. No flat sleep can do this job — 300 ms is too short for the ★
+ * celebration to clear the sheet at 390x844 and wasted time once it has.
+ *
+ * And the probe has to be the thing painted at those coordinates, which the
+ * hit test in `readBox` establishes. A stable box is not necessarily a visible
+ * one.
  */
 async function stableBox(cdp: Cdp, selector: string, timeoutMs = 15_000): Promise<Box | null> {
+  await scrollIntoView(cdp, selector);
+
   const deadline = Date.now() + timeoutMs;
   let previous = await readBox(cdp, selector);
   while (Date.now() < deadline) {
     await sleep(SETTLE_MS);
     const current = await readBox(cdp, selector);
-    if (current !== null && previous !== null && sameBox(previous, current)) return current;
+    if (
+      current !== null &&
+      previous !== null &&
+      current.painted &&
+      sameBox(previous.box, current.box)
+    ) {
+      return current.box;
+    }
     previous = current;
   }
   return null;
@@ -265,15 +317,20 @@ async function measure(cdp: Cdp, selector: string, token: number): Promise<Sampl
   const box = await stableBox(cdp, selector);
   if (box === null) return null;
 
-  // 10 s rather than the client's 30 s default: a stalled capture is stalled
-  // on the first frame, and the retry is the thing that recovers it.
-  const { data } = await retry(`screenshot of ${selector}`, () =>
-    cdp.send<{ data: string }>(
+  // Generous, and more generous on each retry. A clip over a live WebGL canvas
+  // is genuinely expensive rather than merely occasionally stuck: measured at
+  // 2.4 s to 5.3 s per capture on a loaded container, climbing across a run.
+  // A short timeout here does not catch a stall, it manufactures one — and
+  // then the retry re-issues a request that was always going to be slow.
+  let attempt = 0;
+  const { data } = await retry(`screenshot of ${selector}`, () => {
+    attempt += 1;
+    return cdp.send<{ data: string }>(
       'Page.captureScreenshot',
       { format: 'png', captureBeyondViewport: false, clip: { ...box, scale: 4 } },
-      10_000,
-    ),
-  );
+      30_000 * attempt,
+    );
+  });
   // Checked after as well as before: a reload between the box read and the
   // capture is the window that produced the wrong pixels in the first place.
   await assertScene(cdp, token, `the screenshot of ${selector}`);

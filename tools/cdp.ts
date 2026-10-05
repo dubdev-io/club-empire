@@ -132,11 +132,21 @@ const NAV_AWAY = '__clubNavAway';
  */
 export async function navigate(cdp: Cdp, url: string, timeoutMs = 15_000): Promise<void> {
   // A fresh target has no document worth stamping yet; that is not an error.
-  await cdp.evaluate(`window[${JSON.stringify(NAV_AWAY)}] = true; return true;`).catch(() => null);
+  const here = await cdp.evaluate<string | null>(`
+      window[${JSON.stringify(NAV_AWAY)}] = true;
+      return window.location.href;
+    `).catch(() => null);
 
-  const result = await cdp.send<{ errorText?: string }>('Page.navigate', { url });
-  if (result.errorText !== undefined) {
-    throw new Error(`navigation to ${url} failed: ${result.errorText}`);
+  // `Page.navigate` to the URL already loaded is a no-op in Chrome: no new
+  // document, so the barrier below would wait out its deadline on a page that
+  // was never going to be replaced. A reload always makes a new document.
+  if (here === url || here === `${url}/`) {
+    await cdp.send('Page.reload', { ignoreCache: false });
+  } else {
+    const result = await cdp.send<{ errorText?: string }>('Page.navigate', { url });
+    if (result.errorText !== undefined) {
+      throw new Error(`navigation to ${url} failed: ${result.errorText}`);
+    }
   }
 
   const deadline = Date.now() + timeoutMs;
