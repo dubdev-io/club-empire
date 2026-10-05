@@ -1,7 +1,7 @@
 /**
  * Does the boot progress bar actually reach the screen once the load passes 1 s?
  *
- *   CLUB_URL=http://127.0.0.1:4173 node tools/boot-progress.ts 1 6 10 20
+ *   CLUB_URL=http://127.0.0.1:4173/club-empire node tools/boot-progress.ts 1 6 10 20
  *
  * DUB-21: the bar was gated by a `setTimeout` scheduled from the boot screen's
  * effect, and on a slow load that timer never ran. Not because it was wrong, but
@@ -14,19 +14,46 @@
  * This script is the regression instrument, and it measures two different things
  * on purpose:
  *
- *  - `missingDom` — frames where `.boot` is mounted at t >= 1000 and
- *    `.boot__progress` is not in the DOM. This is QA's acceptance criterion
- *    (`qa-harness/scripts/boot-progress-timeline.mjs`).
- *  - `missingPaint` — the same frames where the bar is in the DOM but still
- *    fully transparent. DOM presence is not visibility, and the reveal is a CSS
- *    animation precisely so that it survives a blocked main thread; this column
- *    is what proves it did.
+ *  - `missingDomMs` — *milliseconds* in which `.boot` is mounted at t >= 1000
+ *    and `.boot__progress` is not in the DOM. This is the verdict, and it is
+ *    QA's acceptance criterion (`qa-harness/scripts/boot-progress-timeline.mjs`).
+ *    Elapsed time rather than sampled frames, for the reason in `report()`.
+ *  - `missingPaint` — of the frames the probe *did* get to sample, how many had
+ *    the bar in the DOM but still fully transparent. A corroborating signal and
+ *    not a proof: it is counted from `requestAnimationFrame`, and a blocked main
+ *    thread fires no rAF, so on exactly the loads this ticket is about there are
+ *    one or two samples at most and `missingPaint === 0` is close to vacuous.
+ *    Read the `dark/seen` column together: a 0 out of 0 says nothing.
+ *
+ * Proof that the reveal reaches the *screen* through a blocked thread has to
+ * come from outside the renderer's main thread, so it is out of band here:
+ * `Page.startScreencast` keeps delivering compositor frames through a 700 ms
+ * long task, and correlates to page time via `performance.timeOrigin`. Both the
+ * DUB-21 fix and its review used it to watch the fade and the sweep advance
+ * while the thread was blocked. Reading it needs JPEG decoding and a judgement
+ * about pixels, which is a human's job and not a CI gate's — this script gates
+ * the thing it can gate honestly, and says so.
  *
  * Needs a preview server and a headless Chrome with `--remote-debugging-port`,
- * the same pair `npm run measure:frames` uses. CPU throttling is applied through
- * CDP, which is the only knob here that moves the boot window across the 1 s
- * gate — mount time, not the throttle rate, is what decides the outcome.
+ * the same pair `npm run measure:frames` uses — and the preview server's base
+ * path in `CLUB_URL`, because `dist/` is built for `/club-empire/`. CPU
+ * throttling is applied through CDP, which is the only knob here that moves the
+ * boot window across the 1 s gate — mount time, not the throttle rate, is what
+ * decides the outcome.
+ *
+ * Exit status:
+ *
+ *   0  every load that reached the measured condition passed
+ *   1  at least one load was owed a bar and did not have one
+ *   2  usage
+ *   3  at least one load produced no measurement at all — the boot screen never
+ *      appeared, or no load was still booting at the threshold. On those rows
+ *      the instrument has no opinion, and an instrument with no opinion must
+ *      not report a pass. That false green is the same one the first,
+ *      frame-counting version of this file produced.
  */
+
+import { pathToFileURL } from 'node:url';
 
 const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:4173';
 const DEBUG_URL = process.env.CLUB_CDP ?? 'http://127.0.0.1:9222';
@@ -40,6 +67,17 @@ const GRACE_MS = 32;
 /** How many times to repeat each rate. The failure was intermittent by nature. */
 const REPEATS = Number(process.env.CLUB_BOOT_REPEATS ?? 1);
 
+/**
+ * How long to let a measured load run before reading its record back.
+ *
+ * Scaled with the throttle rate, because that is what it slows down. Overridable
+ * because the floor of what a cold load costs is the host's, not ours: a load
+ * that has not reached the boot screen inside the budget reports `no-boot` and
+ * fails the run rather than being averaged away, so there has to be a knob.
+ */
+const waitMsFor = (rate: number): number =>
+  Number(process.env.CLUB_BOOT_WAIT_MS ?? Math.max(5_000, 1_000 * rate));
+
 const RATES = process.argv.slice(2).map(Number).filter(Number.isFinite);
 
 interface Sample {
@@ -47,6 +85,8 @@ interface Sample {
   boot: boolean;
   bar: boolean;
   opacity: number;
+  /** The inlined `#boot-fallback`. Still up at the end means React never ran. */
+  fallback: boolean;
 }
 
 interface Timeline {
@@ -70,7 +110,17 @@ interface RunReport {
   /** Of those, frames where the bar was in the DOM but fully transparent. */
   missingPaint: number;
   busyMsAfterGate: number;
-  verdict: 'pass' | 'fail' | 'n/a';
+  /** `#boot-fallback` was still on the page at the last sample. */
+  fallbackStuck: boolean;
+  /**
+   * `pass`/`fail` are verdicts. The other two are not:
+   *
+   *  - `n/a` — the load finished before the threshold, so no bar was owed and
+   *    a bar there would be the defect rather than the fix. Nothing measured.
+   *  - `no-boot` — `.boot` never entered the DOM, so the page under measurement
+   *    was not the one we meant to measure. Nothing measured, and an error.
+   */
+  verdict: 'pass' | 'fail' | 'n/a' | 'no-boot';
 }
 
 class Cdp {
@@ -161,6 +211,7 @@ const PROBE = `
       boot: Boolean(bootEl),
       bar: Boolean(barEl),
       opacity: barEl ? Number(getComputedStyle(barEl).opacity) : 0,
+      fallback: Boolean(document.querySelector('#boot-fallback')),
     };
   };
 
@@ -274,9 +325,42 @@ function report(rate: number, repeat: number, timeline: Timeline): RunReport {
     samples: owedSamples.length,
     missingPaint,
     busyMsAfterGate: busyAfterGate(timeline, bootFrom ?? 0, owedTo),
+    fallbackStuck: timeline.samples.at(-1)?.fallback === true,
     verdict:
-      owedMs <= GRACE_MS ? 'n/a' : missingDomMs <= GRACE_MS && missingPaint === 0 ? 'pass' : 'fail',
+      // `.boot` never in the DOM is not a boot that was too fast to need a bar.
+      // It is a page that did not run our bundle, and the instrument has to be
+      // able to tell those apart or a broken URL reads as a clean run.
+      bootFrom === null
+        ? 'no-boot'
+        : owedMs <= GRACE_MS
+          ? 'n/a'
+          : missingDomMs <= GRACE_MS && missingPaint === 0
+            ? 'pass'
+            : 'fail',
   };
+}
+
+/**
+ * What the run as a whole comes to, and the status it exits with.
+ *
+ * Separated out and exported so it can be asserted rather than demonstrated:
+ * this is the part that was wrong at `c37868d`, where a run of eight rows that
+ * all read `.boot window: never` printed a cheerful summary and exited 0. The
+ * rule is that only a measurement can produce a pass — `pass` and `fail` are
+ * measurements, `n/a` and `no-boot` are not, and a run with none of the former
+ * has no opinion and must not be mistaken for agreement.
+ */
+export function tally(reports: readonly RunReport[]): {
+  failures: RunReport[];
+  unbooted: RunReport[];
+  overdue: RunReport[];
+  code: 0 | 1 | 3;
+} {
+  const failures = reports.filter((r) => r.verdict === 'fail');
+  const unbooted = reports.filter((r) => r.verdict === 'no-boot');
+  const overdue = reports.filter((r) => r.verdict === 'pass' || r.verdict === 'fail');
+  const code = failures.length > 0 ? 1 : unbooted.length > 0 || overdue.length === 0 ? 3 : 0;
+  return { failures, unbooted, overdue, code };
 }
 
 async function measure(cdp: Cdp, rate: number, repeat: number): Promise<RunReport> {
@@ -299,7 +383,7 @@ async function measure(cdp: Cdp, rate: number, repeat: number): Promise<RunRepor
 
   await cdp.send('Emulation.setCPUThrottlingRate', { rate });
   await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
-  await sleep(Math.max(5_000, 1_000 * rate));
+  await sleep(waitMsFor(rate));
 
   await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: probe.identifier });
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
@@ -356,6 +440,9 @@ async function main(): Promise<void> {
   console.log('Club Empire — boot progress bar against the 1 s gate');
   console.log(`  url     ${BASE_URL}`);
   console.log(`  gate    ${GATE_MS} ms from the navigation time origin (+${GRACE_MS} ms frame grace)`);
+  console.log(
+    `  wait    ${RATES.map((r) => `${r}x:${waitMsFor(r)}ms`).join('  ')}  (CLUB_BOOT_WAIT_MS)`,
+  );
   console.log('');
   console.log(
     `  ${'cpu'.padEnd(5)}${'rep'.padEnd(4)}${'.boot window'.padEnd(18)}${'.boot__progress'.padEnd(13)}` +
@@ -372,8 +459,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const failures = reports.filter((r) => r.verdict === 'fail');
-  const overdue = reports.filter((r) => r.verdict !== 'n/a');
+  const { failures, unbooted, overdue, code } = tally(reports);
   console.log(`  ${'-'.repeat(86)}`);
   console.log('');
   console.log(
@@ -382,10 +468,46 @@ async function main(): Promise<void> {
   console.log('  owed/missing are ms of the boot screen past the threshold, not frame counts:');
   console.log('  a blocked main thread samples no frames, and a window with no samples in it');
   console.log('  scores zero missing frames whatever is on screen. `dark/seen` is the frames');
-  console.log('  that were sampled, and how many of them had the bar present but transparent.');
-  console.log('  `busy` is main-thread time inside long tasks after the threshold — the reason');
-  console.log('  a timer-gated bar never appeared. A CSS-gated one does not need the thread.');
+  console.log('  that were sampled, and how many of them had the bar present but transparent —');
+  console.log('  corroborating, not proof: 0 out of 0 says nothing, which is the usual case on');
+  console.log('  the slow loads this measures. `busy` is main-thread time inside long tasks');
+  console.log('  after the threshold — the reason a timer-gated bar never appeared. A CSS-gated');
+  console.log('  one does not need the thread.');
   console.log('');
+
+  if (unbooted.length > 0) {
+    console.error(
+      `  ${unbooted.length} of ${reports.length} load(s) never put \`.boot\` in the DOM at all,`,
+    );
+    console.error('  so there was nothing to measure on them. Not a pass — no measurement is not');
+    console.error('  a good measurement, which is the whole lesson of this ticket.');
+    if (unbooted.every((r) => r.fallbackStuck)) {
+      // `main.tsx` removes `#boot-fallback` in the same task as React's first
+      // commit, so the fallback still being up at the end means the bundle's
+      // module body never got that far. Two causes, and the script cannot tell
+      // them apart from here, so it names both rather than guessing.
+      console.error('');
+      console.error('  `#boot-fallback` was still up at the end of every one, so the bundle never');
+      console.error('  executed. Either:');
+      console.error('');
+      console.error(`   - ${BASE_URL} is not serving the built JavaScript. This is the one that`);
+      console.error('     has actually happened: `vite preview` on a base the build does not use');
+      console.error('     answers the module path with the SPA fallback, so the script arrives as');
+      console.error('     `text/html`, is refused, and React never mounts. `dist/` is built for');
+      console.error('     /club-empire/, so CLUB_URL needs that path on it. Check with:');
+      console.error(`       curl -so /dev/null -w '%{content_type}\\n' <the module dist asks for>`);
+      console.error('   - or the load did not get there inside the wait budget. Raise it with');
+      console.error('     CLUB_BOOT_WAIT_MS.');
+    }
+    console.error('');
+  }
+
+  if (overdue.length === 0 && unbooted.length === 0) {
+    console.error('  Nothing was measured: every load finished before the threshold, so no frame');
+    console.error('  was owed a bar and there is nothing to have an opinion about. This is not a');
+    console.error('  pass either. Raise the CPU throttle rates until a load crosses the gate.');
+    console.error('');
+  }
 
   if (process.env.CLUB_BOOT_JSON !== undefined && process.env.CLUB_BOOT_JSON !== '') {
     const { writeFile } = await import('node:fs/promises');
@@ -395,10 +517,14 @@ async function main(): Promise<void> {
   }
 
   cdp.close();
-  if (failures.length > 0) process.exit(1);
+  if (code !== 0) process.exit(code);
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exit(1);
-});
+// Only when run as a script, so `bootProgressTally.test.ts` can import `tally`
+// without driving a browser.
+if (process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
