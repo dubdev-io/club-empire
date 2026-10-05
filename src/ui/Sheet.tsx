@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { ReactNode } from 'react';
+import { ctaClassName } from './ctaClass.ts';
 
 /**
  * The bottom sheet every panel in the game uses.
@@ -62,6 +64,9 @@ export function Sheet({ title, subtitle, onClose, children }: SheetProps): React
  *
  * Unaffordable is signalled three ways, because §9 forbids colour alone:
  * reduced opacity, a lock glyph, and the price in `--ink-disabled`.
+ *
+ * Those three are all *at rest*. The press is signalled separately, and from
+ * pointer events rather than left to CSS `:active` — see `pressed` below.
  */
 export interface BuyButtonProps {
   readonly label: string;
@@ -86,16 +91,55 @@ export function BuyButton({
   const isDone = doneLabel !== undefined;
   const inactive = disabled || isDone;
 
+  /*
+   * The pressed state, driven from pointer events instead of CSS `:active`.
+   *
+   * `.cta:active` is still in the stylesheet and still carries the mouse and
+   * the keyboard, but it cannot be the *only* source on the device this game
+   * targets. iOS Safari withholds `:active` on touch unless a touch handler
+   * sits in the element's ancestor chain, and React's root-level `pointerdown`
+   * delegation is not one; `global.css` also clears
+   * `-webkit-tap-highlight-color` document-wide, so the platform's own press
+   * affordance is gone too. A `:active`-only press can therefore reach a phone
+   * as no feedback at all — which is the whole of DUB-38. A class we set
+   * ourselves cannot.
+   *
+   * One `useState` per button, set on `pointerdown` and cleared on the way up.
+   * This is sheet UI, not the game loop: it re-renders one button, and it does
+   * it in the same event, so the paint lands on the next frame either way.
+   */
+  const [pressed, setPressed] = useState(false);
+  const release = (): void => {
+    setPressed(false);
+  };
+
   return (
     <button
       type="button"
-      className={`cta cta--${accent}${affordable && !inactive ? ' cta--affordable' : ''}`}
-      // Not `disabled`: an unaffordable button that cannot be pressed gives no
-      // feedback at all, and §9 requires every tap to produce a visible
-      // change. Pressing it flashes the price instead, which tells the player
-      // the thing they wanted costs more than they have.
+      className={ctaClassName({ accent, affordable, inactive, pressed })}
+      // Not `disabled`: a disabled button takes no pointer events and gets no
+      // `:active` either, so an unaffordable one would answer a tap with
+      // nothing at all — and §9 requires every tap to produce a visible
+      // change. So the button stays live and the tap is answered by the press
+      // treatment instead (`.cta--pressed` in ui.css): the button shrinks, its
+      // edge lights up where it used to dissolve into the card behind it, and
+      // on a tap that buys nothing the price lights up with it. `onBuy` is
+      // still withheld.
       aria-disabled={inactive}
-      onPointerDown={inactive ? undefined : onBuy}
+      onPointerDown={() => {
+        // Feedback first and unconditionally. The tap that buys nothing is
+        // exactly the one this button used to swallow.
+        setPressed(true);
+        if (!inactive) onBuy();
+      }}
+      onPointerUp={release}
+      // A finger is implicitly captured by the element that got `pointerdown`,
+      // so touch always delivers its `up` here. `pointercancel` covers the
+      // gesture being taken over (a scroll starting), and `pointerleave` the
+      // mouse, which is *not* captured: dragged off the button before release
+      // it fires neither, and the class would stick.
+      onPointerCancel={release}
+      onPointerLeave={release}
     >
       <span className="cta__label">{label}</span>
       {isDone ? (

@@ -674,10 +674,6 @@
   letter-spacing: 0.08em;
 }
 
-.cta:active {
-  background: var(--bg-raised);
-}
-
 .cta--affordable {
   border-color: var(--cash-green);
 }
@@ -745,6 +741,72 @@
   font-size: var(--text-sm);
   letter-spacing: 0.08em;
   color: var(--gold-vip);
+}
+
+/* --- the pressed state (DUB-38) ------------------------------------------
+ *
+ * This used to be one declaration, `.cta:active { background: var(--bg-raised) }`,
+ * and it was worse than small. The buy buttons sit inside a `.station-row`,
+ * which *is* `--bg-raised`, and `.cta`'s border is `1px solid var(--bg-raised)`
+ * as well — so pressing a button repainted it to the exact colour of the card
+ * behind it and dropped its outline in the same frame. Measured on the live DOM
+ * at 390x844: 1:1 against the card. The button did not flash, it stopped
+ * existing, leaving the player holding a finger on two bits of floating text.
+ *
+ * The lesson is that a dark UI has no room left on the background axis — the
+ * only surface below `--bg-surface` is the room itself. So the press moves what
+ * the card cannot cancel:
+ *
+ *  - every variant shrinks, which is geometry and reads under a thumb where a
+ *    few per cent of luminance does not;
+ *  - a tap that buys nothing additionally gains a ring and lights its price,
+ *    because it has no state change of its own to be read as feedback. A tap
+ *    that *does* buy something is answered by the purchase: the cash falls, the
+ *    level moves, the fill may even drop away.
+ *
+ * Matched as `.cta.cta--pressed` (0,2,0), not `.cta--pressed` (0,1,0): the
+ * accent fills are `.cta--cyan.cta--affordable` and friends, also (0,2,0), and
+ * a one-class press selector would be out-specified by them on every
+ * purchasable button. `.cta--pressed` is set from `BuyButton`; `:active` is the
+ * mouse and keyboard path and carries the `.cta` buttons built by hand
+ * elsewhere (settings, the offline-return card).
+ *
+ * No transition, in or out — same reason as `.bar-button:active`. A tween
+ * between the tap and the response is the latency players read as
+ * "unresponsive".
+ */
+.cta.cta--pressed,
+.cta:active {
+  transform: scale(0.97);
+}
+
+.cta.cta--pressed:not(.cta--affordable),
+.cta:active:not(.cta--affordable) {
+  border-color: var(--ink-primary);
+  /* An inset ring rather than a thicker border: `border-width` is in the layout
+     box, so growing it on press would shove the label and the price sideways. */
+  box-shadow: inset 0 0 0 2px var(--ink-primary);
+}
+
+/* The price flash. `--ink-disabled` -> `--ink-primary` is the largest step the
+   ink ramp has, and it lands on the one thing the player needs to look at when
+   the tap did nothing: what it costs. Paired with the scale and the lock glyph,
+   never colour alone (§9). */
+.cta.cta--pressed:not(.cta--affordable) .cta__price,
+.cta:active:not(.cta--affordable) .cta__price {
+  color: var(--ink-primary);
+  transform: scale(1.1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The scale goes, the ring and the price do not. Reduced motion removes
+     movement, not feedback — the same line the ★ celebration takes. */
+  .cta.cta--pressed,
+  .cta:active,
+  .cta.cta--pressed:not(.cta--affordable) .cta__price,
+  .cta:active:not(.cta--affordable) .cta__price {
+    transform: none;
+  }
 }
 
 /* =========================================================================
