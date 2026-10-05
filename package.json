@@ -18,6 +18,7 @@
     "shots:pips": "node tools/pipshot.ts",
     "a11y:burst": "node tools/burstax.ts",
     "measure:contrast": "node tools/contrast.ts",
+    "audit:focus": "node tools/screenshots.ts --focus-audit",
     "measure:frames": "node tools/frametime.ts"
   },
   "dependencies": {

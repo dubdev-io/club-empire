@@ -375,9 +375,17 @@
    * WCAG 2.4.11, focus not obscured (DUB-50). `overflow-y: auto` clips at this
    * box's padding edge, and the vertical padding here used to be 0 — so the
    * first and last controls in every sheet sat flush against a clipping edge
-   * and had their rings cut off. Measured during the DUB-50 tab-through at
-   * 1440x900: 0.0 px of clearance on the Door sheet's single buy button and on
-   * both ends of Settings.
+   * and had their rings cut off.
+   *
+   * `npm run audit:focus` is where that measurement comes from, and the way to
+   * get it back: revert this to `padding: 0 var(--gutter)` and it reports, at
+   * 1440x900, a 0.0 px gap between the control and the clipping edge — so all
+   * 6 px of the ring lands outside it, clearance -6.0 — on the Door sheet's
+   * single buy button, on both ends of Settings, and on the last row of Bars.
+   * Then it fails the run. With the padding those stops read 0.0 px of
+   * *clearance* instead: the ring ends exactly on the edge, which is legal, and
+   * is why the padding and the reach are one token rather than two numbers that
+   * happen to agree today.
    *
    * Two declarations, because there are two ways to lose the ring here:
    *

@@ -52,6 +52,7 @@ npm run sim:autobuy      # the SHIPPING game against the same table
 node tools/autobuy.ts --tap   # ...with a player collecting every bubble
 
 npm run shots            # all ten states at 390x844 and 1440x900
+npm run audit:focus      # every tab stop in the three sheets, measured (DUB-50)
 npm run measure:frames   # per-system frame time at the §11 entity ceiling
 npm run measure:contrast # WCAG ratios off the painted pixels, not the stylesheet
 ```
@@ -68,8 +69,19 @@ worked out from `tokens.css` misses whatever an ancestor `opacity` did to the
 text: that is how the MAXED badge came to be quoted at 3.13:1 when it rendered at
 4.31:1 (DUB-42).
 
-`shots`, `measure:frames` and `measure:contrast` need a dev server and a headless
-Chrome with remote debugging:
+`audit:focus` walks the real tab ring at 1440x900 and reads the ring the browser
+actually drew off `document.activeElement` — `outline-width`, and how much room
+it has inside every clipping ancestor. It fails on a stop with no ring or a
+clipped one, which is the half of the focus work a source-reading test cannot
+reach: `vitest` runs on node, where there is no layout and no `:focus-visible`.
+
+The two are complementary and the maxed buy row is where that shows: `audit:focus`
+proves a ring was drawn and is not clipped, and `measure:contrast` is the only one
+of the two that can tell you the ring on an `aria-disabled` row is painted through
+`opacity: 0.55` and so is not the token colour at all (DUB-50).
+
+`shots`, `audit:focus`, `measure:frames` and `measure:contrast` need a dev server
+and a headless Chrome with remote debugging:
 
 ```bash
 npm run dev &
