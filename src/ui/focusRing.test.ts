@@ -19,15 +19,27 @@
  *    `box-shadow: inset` the two states stop being distinguishable — and
  *    nothing on screen would look broken, which is why it needs a test.
  *  - **Measurement.** WCAG 1.4.11 wants 3:1 for the indicator and 2.4.11 wants
- *    it unclipped. Both are arithmetic on the tokens, so both are checkable
- *    here rather than only in a screenshot: the ratio is computed against every
- *    surface the ring can land on, and the ring's reach is held under the
+ *    it unclipped. The parts of both that are arithmetic on the tokens are
+ *    checkable here rather than only in a screenshot: the ratio against the
+ *    three flat surfaces a ring lands on, and the ring's reach against the
  *    tightest padding in the game.
  *
- * What is *not* here: whether the ring renders. `vitest` runs on the node
- * environment with no DOM and no CSSOM, so that belongs to the screenshot
- * harness (`npm run shots`, shots 23-24) and to QA on a device — the same split
- * `ctaPress.test.ts` draws.
+ * What is *not* here, and the boundary matters because this file is the gate CI
+ * runs:
+ *
+ *  - **Whether the ring renders at all.** `vitest` runs on the node environment
+ *    with no DOM and no CSSOM. That belongs to `npm run audit:focus`, which
+ *    tabs the real ring and reads `outline-width` off `document.activeElement`,
+ *    and to QA on a device — the same split `ctaPress.test.ts` draws.
+ *  - **Composited contrast.** The arithmetic below is flat-colour arithmetic. It
+ *    is right for a ring on the sheet, the card or the room, and it says nothing
+ *    about a ring under a translucent layer. There is exactly one such case
+ *    today and it fails 1.4.11 — see `the ring behind the scrim` below.
+ *  - **Clipping by anything but the two scroll containers.** Six `overflow:
+ *    hidden` boxes clip without scrolling (`.meter__track`,
+ *    `.star-progress__track`, `.confetti`, `.boot__progress`,
+ *    `.visually-hidden`, and `body` itself); none contains a focusable control
+ *    today, and `audit:focus` is what would notice if one appeared.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -49,6 +61,26 @@ function block(css: string, selector: string): string {
   expect(at, `no rule for ${selector}`).toBeGreaterThan(-1);
   const open = css.indexOf('{', at);
   return css.slice(open + 1, css.indexOf('}', open));
+}
+
+/**
+ * The body of the one rule whose selector list mentions `inSelector` and whose
+ * declarations mention `inBody`.
+ *
+ * Preferred over `block` whenever the rule is someone else's: a literal
+ * selector string pins the other author's formatting — their selector order,
+ * their line breaks — and breaks on a reformat that changed nothing. This file
+ * reads the DUB-38 press rule, which is on a branch that still has to be
+ * rebased onto `phase1-build`, so it asks for "the pressed rule that draws a
+ * ring" rather than for two exact lines with an exact newline between them.
+ */
+function blockMatching(css: string, inSelector: string, inBody: string): string {
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(
+    ([, selector, body]) => selector!.includes(inSelector) && body!.includes(inBody),
+  );
+
+  expect(rules.length, `expected one rule with ${inSelector} declaring ${inBody}`).toBe(1);
+  return rules[0]![2]!;
 }
 
 /** `--name: value;` for one token, as written. */
@@ -97,6 +129,36 @@ function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+/** `#rrggbb` as its three channels. */
+function channels(hex: string): [number, number, number] {
+  const n = Number.parseInt(/^#([0-9a-f]{6})$/i.exec(hex)![1]!, 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+/** `#rrggbb` again after `over` is painted on top of it at `alpha`. */
+function composite(under: string, over: string, alpha: number): string {
+  const [ur, ug, ub] = channels(under);
+  const [or_, og, ob] = channels(over);
+  const mix = (u: number, o: number): string =>
+    Math.round(u * (1 - alpha) + o * alpha)
+      .toString(16)
+      .padStart(2, '0');
+
+  return `#${mix(ur, or_)}${mix(ug, og)}${mix(ub, ob)}`;
+}
+
+/** `rgb(r g b / p%)` -> its colour and its alpha, as written in the tokens. */
+function translucentToken(name: string): { readonly hex: string; readonly alpha: number } {
+  const value = resolve(token(name));
+  const match = /^rgb\(\s*(\d+)\s+(\d+)\s+(\d+)\s*\/\s*(\d+(?:\.\d+)?)%\s*\)$/.exec(value);
+  expect(match, `${name} is "${value}", not an rgb()-with-alpha colour`).not.toBeNull();
+
+  const hex = `#${[1, 2, 3]
+    .map((i) => Number.parseInt(match![i]!, 10).toString(16).padStart(2, '0'))
+    .join('')}`;
+  return { hex, alpha: Number.parseFloat(match![4]!) / 100 };
+}
+
 describe('the focus ring token', () => {
   it('exists, once, as tokens rather than as a literal at a call site', () => {
     for (const name of ['--focus-ring-width', '--focus-ring-offset', '--focus-ring-color']) {
@@ -120,21 +182,62 @@ describe('the focus ring token', () => {
     expect(pxToken('--focus-ring-offset')).toBeGreaterThan(0);
   });
 
-  it('clears 3:1 against every surface a ring can land on (WCAG 1.4.11)', () => {
+  it('clears 3:1 on each of the three flat surfaces (WCAG 1.4.11)', () => {
     const ring = resolve(token('--focus-ring-color'));
 
-    // The three backgrounds in the game. Because the offset holds the ring
-    // outside the button, the surface under it is always one of these — the
-    // sheet, the station card, or the room behind the bottom bar.
+    // The three opaque backgrounds in the game. Because the offset holds the
+    // ring outside the button, an *unobscured* ring lands on one of these —
+    // the sheet, the station card, or the room behind the bottom bar. Three
+    // surfaces, not "every surface": the scrim makes a fourth, below.
     for (const surface of ['--bg-room', '--bg-surface', '--bg-raised']) {
       expect(contrast(ring, resolve(token(surface))), `ring on ${surface}`).toBeGreaterThanOrEqual(3);
     }
+  });
+
+  it('does not clear 3:1 behind the scrim — which is the trap`s job, not the ring`s', () => {
+    /*
+     * The known 1.4.11 gap, pinned rather than left for someone to re-find.
+     *
+     * `Sheet` renders `role="dialog" aria-modal="true"` with no focus trap and
+     * no `inert`, and `App` renders `<BottomBar />` before the sheet — so the
+     * three bar buttons stay in the tab ring while a sheet is open, behind
+     * `.overlay__scrim`. Tab lands there first, and the ring it draws is
+     * composited *under* the scrim: the scrim darkens the ring, not just the
+     * backdrop, and `--ink-primary` is far too light to survive that.
+     *
+     * No offset can fix it and no colour can either — `--ink-primary` sits at
+     * L 0.894 and only a ring below L 0.265 would clear 3:1 here. The fix is
+     * to stop focus getting behind the scrim at all, which is a change to the
+     * dialog and not to this stylesheet. Tracked in DUB-72, next to the
+     * keyboard-activation work in DUB-59.
+     *
+     * Not a regression: the browser default ring had exactly the same problem.
+     *
+     * If this test starts failing, something good probably happened. Check
+     * which: focus is now trapped (delete this test, the surface is gone), or
+     * the scrim/ring changed enough to clear 3:1 (move `behind the scrim` up
+     * into the list above).
+     */
+    const ring = resolve(token('--focus-ring-color'));
+    const scrim = translucentToken('--scrim');
+    const room = resolve(token('--bg-room'));
+
+    const ringUnderScrim = composite(ring, scrim.hex, scrim.alpha);
+    const roomUnderScrim = composite(room, scrim.hex, scrim.alpha);
+
+    expect(contrast(ringUnderScrim, roomUnderScrim)).toBeLessThan(3);
   });
 
   it('reaches less far than the tightest container it sits in (WCAG 2.4.11)', () => {
     // `.bottom-bar`'s block-start padding is the smallest gap between a control
     // and an edge anywhere in the game. The ring has to fit inside it or the
     // bar buttons' rings get cut off along the top.
+    //
+    // The block-start edge only: this reads the first value of a three-value
+    // `padding`, deliberately. The inline budget is `.bottom-bar`'s 8 px `gap`,
+    // shared, so 4 px each — which the reach already exceeds and is allowed to,
+    // because the ring overlaps a *sibling* button rather than being clipped by
+    // anything, and only one of them is focused at a time.
     const barPadding = resolve(block(uiRules, '.bottom-bar {').match(/padding:\s*([^\s;]+)/)![1]!);
     const reach = pxToken('--focus-ring-width') + pxToken('--focus-ring-offset');
 
@@ -165,14 +268,21 @@ describe('the focus ring rule', () => {
       ['global.css', globalRules],
       ['ui.css', uiRules],
     ] as const) {
-      expect(css.match(/:focus(?!-visible)\b/g), `bare :focus in ${file}`).toBeNull();
+      // `(?![\w-])` and not `(?!-visible)\b`: the latter reports `:focus-within`
+      // as a bare `:focus`, because `\b` sits happily between `s` and `-`. Any
+      // `:focus-*` pseudo-class is fine here; it is `:focus` alone that strands
+      // a ring on whatever the mouse last clicked.
+      expect(css.match(/:focus(?![\w-])/g), `bare :focus in ${file}`).toBeNull();
     }
   });
 
-  it('never cancels itself with outline: none', () => {
-    // The usual way a focus ring dies: a reset somewhere downstream.
+  it('never cancels itself with an outline reset', () => {
+    // The usual way a focus ring dies: a reset somewhere downstream. All four
+    // spellings, because `outline: 0`, `outline: 0px`, `outline-width: 0` and
+    // `outline-style: none` kill it identically — and a `\b` after the `0`
+    // would let `0px` through, since there is no word boundary inside `0px`.
     for (const css of [globalRules, uiRules]) {
-      expect(css).not.toMatch(/outline:\s*(none|0)\b/);
+      expect(css).not.toMatch(/outline(?:-width|-style)?:\s*(?:none|0[a-z%]*)\s*(?:;|$)/m);
     }
   });
 });
@@ -180,10 +290,7 @@ describe('the focus ring rule', () => {
 describe('focus against the DUB-38 press', () => {
   it('stays on the outset axis while the press keeps the inset one', () => {
     const focus = block(globalRules, ':focus-visible {');
-    const press = block(
-      uiCss,
-      '.cta.cta--pressed:not(.cta--affordable),\n.cta:active:not(.cta--affordable) {',
-    );
+    const press = blockMatching(uiRules, 'cta--pressed', 'box-shadow');
 
     // Both are legible at once only while they are on different axes. A
     // keyboard player holding Space is in both states.
@@ -213,7 +320,7 @@ describe('scroll containers', () => {
     for (const selector of ['.sheet__body {', '.card--tall {']) {
       const rule = block(uiRules, selector);
 
-      expect(rule, selector).toContain('overflow-y: auto');
+      expect(rule, selector).toMatch(/overflow(?:-[xy])?:\s*(?:auto|scroll)/);
       expect(rule, selector).toContain('scroll-padding-block: var(--focus-ring-reach)');
     }
   });
@@ -232,7 +339,12 @@ describe('scroll containers', () => {
 
   it('covers every scroll container in the stylesheet', () => {
     // If a third one appears, it needs the same padding and this test needs a
-    // third entry above.
-    expect(uiRules.match(/overflow-y:\s*auto/g)).toHaveLength(2);
+    // third entry above. Every spelling that makes a scroll container, not just
+    // the two that happen to be written today: `overflow: auto` and
+    // `overflow-y: scroll` scroll and clip exactly as `overflow-y: auto` does,
+    // so a tripwire that only knew the long-hand-auto form would wave them
+    // through. (`-webkit-overflow-scrolling` does not match — the pattern wants
+    // a colon straight after the axis.)
+    expect(uiRules.match(/overflow(?:-[xy])?:\s*(?:auto|scroll)/g)).toHaveLength(2);
   });
 });

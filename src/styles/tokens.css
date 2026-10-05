@@ -108,13 +108,21 @@
    * sits outside the layout box, so unlike a wider `border` it cannot shove the
    * label and the price sideways.
    *
-   * Contrast, measured against the three surfaces a ring can land on:
+   * Contrast, measured against the three *opaque* surfaces a ring lands on:
    * `--ink-primary` is 14.2:1 on `--bg-raised` (the station card), 16.1:1 on
    * `--bg-surface` (the sheet) and 17.7:1 on `--bg-room` — all far past the 3:1
    * WCAG 1.4.11 asks of a non-text indicator. The accent *fills* are the hard
    * surface (the same white is 1.4:1 on `--neon-cyan`), which is why a non-zero
    * offset is mandatory rather than decorative: it keeps the ring on the card
    * and off the fill, so the fill's colour never enters the measurement.
+   *
+   * One surface those three numbers do not cover, and it fails: a ring drawn
+   * *under* `--scrim` composites to ~2.3:1, because the scrim darkens the ring
+   * and not only what is behind it. That is what the three bottom-bar buttons
+   * get, because they stay in the tab ring while a sheet is open — a dialog
+   * with no focus trap. No ring colour fixes it (nothing lighter than L 0.265
+   * clears 3:1 there), so it is not this token's problem to solve:
+   * `focusRing.test.ts` pins the number and DUB-72 removes the case.
    *
    * Width plus offset is how far the ring reaches past the element's edge, and
    * 2.4.11 (focus not obscured) makes that a budget rather than a free choice.
