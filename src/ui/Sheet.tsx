@@ -58,16 +58,24 @@ export function Sheet({ title, subtitle, onClose, children }: SheetProps): React
 /**
  * The primary action in a sheet: 56 px tall, full width minus two gutters.
  *
- * The pointer buys on `onPointerDown`, not `onClick`: on mobile `click` fires
- * up to ~300 ms after the finger lands, and that delay is the whole difference
- * between a button that feels connected and one that feels dead. Criterion 2 is
- * a 100 ms budget — `click` alone can miss it on its own.
+ * The press and the purchase are two different events here. The *press* is
+ * answered on `onPointerDown`, because on mobile `click` fires up to ~300 ms
+ * after the finger lands and that delay is the whole difference between a
+ * button that feels connected and one that feels dead — criterion 2 is a 100 ms
+ * budget, and `click` alone can miss it on its own.
+ *
+ * The *purchase* is committed on `onPointerUp`, which is not that slow event:
+ * `pointerup` is dispatched as the finger leaves the glass. Waiting for it is
+ * what stops a scroll of this sheet from buying whatever its first pixel landed
+ * on (DUB-60) — a gesture the browser hands to the scroller arrives here as
+ * `pointercancel` and never as `pointerup`.
  *
  * `onClick` is there as well, but only for the activation a pointer never
- * makes: Enter and Space on a focused button produce a `click` and no
- * `pointerdown`, so for a keyboard player the fast path above was no path at
- * all (DUB-51). Which of the two events gets to spend money, and how a tap is
- * kept from spending it twice, is `buyActivation.ts`.
+ * makes: Enter and Space on a focused button produce a `click` and no pointer
+ * events at all, so for a keyboard player the pointer path was no path at all
+ * (DUB-51). Which of the events gets to spend money, how a tap is kept from
+ * spending it twice, and which releases are not purchases, is
+ * `buyActivation.ts`.
  *
  * Unaffordable is signalled three ways, because §9 forbids colour alone:
  * reduced opacity, a lock glyph, and the price in `--ink-disabled`.
@@ -118,12 +126,17 @@ export function BuyButton({
   const [pressed, setPressed] = useState(false);
 
   /*
-   * Which events may buy. A ref, not state: it is read and written inside the
-   * handlers and must never cause a render — see `buyActivation.ts` for what it
-   * means and why `pointerup` does not clear it.
+   * The gesture so far. Refs, not state: they are read and written inside the
+   * handlers and must never cause a render.
+   *
+   * `pointerServed` is which events may buy — see `buyActivation.ts` for what
+   * it means and why `pointerup` does not clear it. `armedPointerId` is the
+   * pointer whose release is allowed to transact, which is how a scroll, a
+   * second finger, and a drag off the button all end up buying nothing.
    */
   const pointerServed = useRef(false);
-  const activation = buyActivation({ pointerServed, inactive, onBuy, setPressed });
+  const armedPointerId = useRef<number | null>(null);
+  const activation = buyActivation({ pointerServed, armedPointerId, inactive, onBuy, setPressed });
 
   return (
     <button
@@ -140,14 +153,18 @@ export function BuyButton({
       // `:active` half of those rules, and is withheld the same way.
       aria-disabled={inactive}
       onPointerDown={activation.pointerDown}
-      onPointerUp={activation.release}
       // A finger is implicitly captured by the element that got `pointerdown`,
-      // so touch always delivers its `up` here. `pointercancel` covers the
-      // gesture being taken over (a scroll starting), and `pointerleave` the
-      // mouse, which is *not* captured: dragged off the button before release
-      // it fires neither, and the class would stick.
-      onPointerCancel={activation.release}
-      onPointerLeave={activation.release}
+      // so touch always delivers its `up` here — including when it has been
+      // dragged well clear of the button, which is why the handler hit-tests
+      // the release rather than trusting its target.
+      onPointerUp={activation.pointerUp}
+      // The two ways a gesture stops being a tap. `pointercancel` is it being
+      // taken over, which for this sheet means a scroll starting; `pointerleave`
+      // is the mouse, which is *not* captured: dragged off the button before
+      // release it fires neither of the other two, and the press class would
+      // stick.
+      onPointerCancel={activation.abort}
+      onPointerLeave={activation.abort}
       // The keyboard's two events. `onKeyDown` buys nothing — it only tells the
       // click handler that the click on its way is a keypress and not the tail
       // of an earlier tap.

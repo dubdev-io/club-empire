@@ -25,13 +25,16 @@
  * DUB-51 then added the other half of the same button: the press treatment
  * above is also what a *keypress* gets, via `:active`, and for a while that was
  * all it got — Enter and Space produced a convincing press and bought nothing,
- * because the purchase was on `pointerdown`. `buyActivation` is pure too, so
- * which events transact is the third kind of fact here and the strongest: a
+ * because the purchase was on `pointerdown`. DUB-60 then found the opposite
+ * failure on the same line: a scroll of the BARS sheet, which a player starts
+ * with a finger on whatever button happens to be under it, bought the thing
+ * before the gesture was recognised as a scroll. `buyActivation` is pure too,
+ * so which events transact is the third kind of fact here and the strongest: a
  * real unit test over a real sequence of events.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { buyActivation } from './buyActivation.ts';
+import { RELEASE_SLOP_PX, buyActivation } from './buyActivation.ts';
 import { ctaClassName } from './ctaClass.ts';
 
 const css = readFileSync(new URL('./ui.css', import.meta.url), 'utf8');
@@ -172,48 +175,92 @@ describe('BuyButton', () => {
   it('routes every one of them through the one module that decides', () => {
     // Not an aesthetic preference. A handler written inline here is a handler
     // outside the sequence test below, and the whole defect was a sequence.
-    expect(sheet).toContain('buyActivation({ pointerServed, inactive, onBuy, setPressed })');
-    for (const handler of ['pointerDown', 'release', 'keyDown', 'click']) {
+    expect(sheet).toContain('buyActivation({ pointerServed, armedPointerId, inactive, onBuy, setPressed })');
+    for (const handler of ['pointerDown', 'pointerUp', 'abort', 'keyDown', 'click']) {
       expect(sheet).toContain(`activation.${handler}`);
     }
   });
+
+  it('keeps the purchase off `pointerdown`, which is what bought a scroll', () => {
+    // DUB-60. `onPointerDown` still answers the press — that is DUB-38 and it
+    // must not regress — but the handler behind it is the one that only arms.
+    expect(sheet).toContain('onPointerDown={activation.pointerDown}');
+    expect(sheet).toContain('onPointerUp={activation.pointerUp}');
+    // The two events that say the gesture was not a tap must not be wired to
+    // the release handler, or a cancelled scroll would commit after all.
+    expect(sheet).toContain('onPointerCancel={activation.abort}');
+    expect(sheet).toContain('onPointerLeave={activation.abort}');
+  });
 });
 
+
 /**
- * The purchase itself: exactly one `onBuy` per activation, by either route.
+ * The purchase itself: exactly one `onBuy` per activation, by every route, and
+ * none at all for a gesture that was not an activation.
  *
- * The two halves pull in opposite directions and that is the whole difficulty.
- * Touch must transact on `pointerdown` or it feels dead (DUB-38), the keyboard
- * only ever delivers a `click` (DUB-51), and a tap delivers *both* — so the
- * same button has to answer two events while charging the player once.
+ * Three requirements pull against each other and that is the whole difficulty.
+ * The press must be answered in the frame the finger lands (DUB-38), the
+ * keyboard only ever delivers a `click` (DUB-51), a tap delivers both a pointer
+ * sequence *and* a trailing click — and a scroll of this sheet begins with a
+ * `pointerdown` indistinguishable from a tap's (DUB-60).
  */
 describe('buyActivation', () => {
-  /** A button mid-render, with its ref box and a spy for the purchase. */
+  /**
+   * The button's box on screen: a full-width CTA in the BARS sheet at 390x844,
+   * one gutter in on each side and `--cta-height` tall.
+   */
+  const rect = { left: 16, top: 400, right: 374, bottom: 456 };
+  const centre = { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
+
+  /** A button mid-render, with its ref boxes and a spy for the purchase. */
   function button({ inactive = false } = {}) {
     const onBuy = vi.fn();
     const setPressed = vi.fn();
     const pointerServed = { current: false };
+    const armedPointerId: { current: number | null } = { current: null };
 
     return {
       onBuy,
       setPressed,
       pointerServed,
-      handlers: buyActivation({ pointerServed, inactive, onBuy, setPressed }),
+      armedPointerId,
+      handlers: buyActivation({ pointerServed, armedPointerId, inactive, onBuy, setPressed }),
     };
+  }
+
+  /** A `pointerup` for one pointer at one point, over a button of that size. */
+  function up(x: number, y: number, pointerId = 1) {
+    return { pointerId, clientX: x, clientY: y, currentTarget: { getBoundingClientRect: () => rect } };
   }
 
   /**
    * One tap, in the order a browser fires it.
    *
-   * `pointerup` and `pointerleave` both land before the compatibility `click` —
-   * touch has implicit capture, so the pointer ceases to exist on release and
-   * the leave is fired for it. Which is exactly why the flag that suppresses
-   * the click cannot be cleared by either of them.
+   * The trailing `pointerleave` is not decoration: touch has implicit capture,
+   * so the pointer ceases to exist on release and the leave is fired for it
+   * *after* the `pointerup`, and before the compatibility `click`. Which is
+   * exactly why the flag that suppresses that click cannot be cleared by
+   * either of them.
    */
   function tap(handlers: ReturnType<typeof buyActivation>, detail = 1): void {
-    handlers.pointerDown();
-    handlers.release();
+    handlers.pointerDown({ pointerId: 1 });
+    handlers.pointerUp(up(centre.x, centre.y));
+    handlers.abort();
     handlers.click({ detail });
+  }
+
+  /**
+   * The gesture DUB-60 measured: a finger lands on an affordable button and
+   * drags up 200 px, and the scroller takes the touch over.
+   *
+   * There is no `pointerup` in here and that is the point — a cancelled pointer
+   * does not get one, and it produces no `click` either. What the button
+   * actually saw over CDP was `pointerdown` -> `pointercancel` -> `pointerleave`.
+   */
+  function scroll(handlers: ReturnType<typeof buyActivation>): void {
+    handlers.pointerDown({ pointerId: 1 });
+    handlers.abort();
+    handlers.abort();
   }
 
   /**
@@ -223,23 +270,100 @@ describe('buyActivation', () => {
    * synthesises the click from the keydown's default action, Space swallows the
    * keydown and clicks on the way up — but both reduce to the same two events
    * reaching this module, in this order, and that is the point: neither of them
-   * is a `pointerdown`, which is why neither of them used to buy anything.
+   * is a pointer event, which is why neither of them used to buy anything.
    */
   function pressKey(handlers: ReturnType<typeof buyActivation>): void {
     handlers.keyDown();
     handlers.click({ detail: 0 });
   }
 
-  it('buys once on a tap, on the pointer down and not on the click after it', () => {
+  it('answers the press at once and buys when the finger lifts, not before', () => {
+    const { handlers, onBuy, setPressed } = button();
+
+    handlers.pointerDown({ pointerId: 1 });
+    // The press feedback is already set here, in the same event as the
+    // `pointerdown` — that is criterion 2's 100 ms budget and DUB-38's whole
+    // fix, and moving the purchase must not move it.
+    expect(setPressed).toHaveBeenCalledWith(true);
+    // The money, though, is still the player's: nothing says yet whether this
+    // is a tap or the start of a scroll.
+    expect(onBuy).not.toHaveBeenCalled();
+
+    handlers.pointerUp(up(centre.x, centre.y));
+    expect(onBuy).toHaveBeenCalledTimes(1);
+    expect(setPressed).toHaveBeenLastCalledWith(false);
+
+    // And the compatibility click ~300 ms later does not buy it again.
+    handlers.abort();
+    handlers.click({ detail: 1 });
+    expect(onBuy).toHaveBeenCalledTimes(1);
+  });
+
+  it('buys nothing when the gesture turns into a scroll (DUB-60)', () => {
+    const { handlers, onBuy, setPressed } = button();
+
+    scroll(handlers);
+
+    expect(onBuy).not.toHaveBeenCalled();
+    // The press was still answered when the finger landed, and taken back when
+    // the scroll claimed it. Feedback is not the thing being withheld.
+    expect(setPressed).toHaveBeenNthCalledWith(1, true);
+    expect(setPressed).toHaveBeenLastCalledWith(false);
+  });
+
+  it('buys nothing when a cancelled gesture is followed by a release anyway', () => {
+    // Belt and braces on the order above: should an engine deliver a
+    // `pointerup` after the `pointercancel`, the cancel has already disarmed
+    // and the release has nothing to commit.
     const { handlers, onBuy } = button();
 
-    handlers.pointerDown();
-    // The purchase is already made here — before `pointerup`, let alone before
-    // the ~300 ms `click`. That is criterion 2's 100 ms budget.
-    expect(onBuy).toHaveBeenCalledTimes(1);
+    handlers.pointerDown({ pointerId: 1 });
+    handlers.abort();
+    handlers.pointerUp(up(centre.x, centre.y));
 
-    handlers.release();
-    handlers.click({ detail: 1 });
+    expect(onBuy).not.toHaveBeenCalled();
+  });
+
+  it('buys nothing when the finger is dragged off the button and lifted', () => {
+    // Touch is implicitly captured, so this `pointerup` is delivered *here*
+    // even though the finger is nowhere near the button. Without the hit test
+    // it would buy, and "slide off the control and let go" is every touch
+    // platform's way of saying no.
+    const { handlers, onBuy } = button();
+
+    handlers.pointerDown({ pointerId: 1 });
+    handlers.pointerUp(up(centre.x, rect.top - 120));
+
+    expect(onBuy).not.toHaveBeenCalled();
+  });
+
+  it('forgives a release that drifts a little, and only a little', () => {
+    // A thumb on a 56 px target moves between landing and lifting, and the
+    // pressed button is `scale(0.97)` at the moment we measure it, so the box
+    // we get back is a few pixels inside the one the player is aiming at.
+    const inside = button();
+    inside.handlers.pointerDown({ pointerId: 1 });
+    inside.handlers.pointerUp(up(rect.right + RELEASE_SLOP_PX - 1, rect.bottom + RELEASE_SLOP_PX - 1));
+    expect(inside.onBuy).toHaveBeenCalledTimes(1);
+
+    const outside = button();
+    outside.handlers.pointerDown({ pointerId: 1 });
+    outside.handlers.pointerUp(up(centre.x, rect.bottom + RELEASE_SLOP_PX + 1));
+    expect(outside.onBuy).not.toHaveBeenCalled();
+  });
+
+  it('is bought by the release of the pointer that pressed it, not another one', () => {
+    const { handlers, onBuy } = button();
+
+    handlers.pointerDown({ pointerId: 1 });
+    // A second finger lands on the same button and lifts first.
+    handlers.pointerDown({ pointerId: 2 });
+    handlers.pointerUp(up(centre.x, centre.y, 1));
+    expect(onBuy).not.toHaveBeenCalled();
+
+    // The pointer that is actually armed still gets its purchase — one, for the
+    // two fingers between them.
+    handlers.pointerUp(up(centre.x, centre.y, 2));
     expect(onBuy).toHaveBeenCalledTimes(1);
   });
 
@@ -274,18 +398,17 @@ describe('buyActivation', () => {
     expect(onBuy).toHaveBeenCalledTimes(2);
   });
 
-  it('lets the keyboard through after a tap that never produced a click', () => {
-    // A tap taken over by a scroll: `pointercancel`, no click, and the flag
+  it('lets the keyboard through after a gesture that never produced a click', () => {
+    // The scroll above: `pointercancel`, no click, and the suppression flag
     // left standing. The next `keydown` is what clears it — which is the other
     // reason `keydown` has a handler at all.
     const { handlers, onBuy } = button();
 
-    handlers.pointerDown();
-    handlers.release();
-    expect(onBuy).toHaveBeenCalledTimes(1);
+    scroll(handlers);
+    expect(onBuy).not.toHaveBeenCalled();
 
     pressKey(handlers);
-    expect(onBuy).toHaveBeenCalledTimes(2);
+    expect(onBuy).toHaveBeenCalledTimes(1);
   });
 
   it('ignores a click no pointer and no key produced, unless it is synthetic', () => {
@@ -330,17 +453,48 @@ describe('buyActivation', () => {
       expect(keyed.setPressed).not.toHaveBeenCalled();
     });
 
-    it('does not let the dead-end tap bank a purchase for the click to make', () => {
-      // The button is inactive when the finger lands and affordable by the time
-      // the click arrives — a price that just dropped, or a tick of income
-      // between the two events. The click must not transact: the player pressed
-      // a button that could not be bought, and nothing has been pressed since.
+    it('does not let the dead-end press bank a purchase for the release to make', () => {
+      // The button is inactive when the finger lands and live by the time it
+      // lifts — a price that just dropped, or a tick of income between the two
+      // events. Letting go must not transact: the player pressed a button that
+      // could not be bought, and nothing has been pressed since.
       const onBuy = vi.fn();
       const pointerServed = { current: false };
+      const armedPointerId: { current: number | null } = { current: null };
+      const render = (inactive: boolean) =>
+        buyActivation({ pointerServed, armedPointerId, inactive, onBuy, setPressed: vi.fn() });
 
-      buyActivation({ pointerServed, inactive: true, onBuy, setPressed: vi.fn() }).pointerDown();
-      // The re-render. Same ref box, same element, `inactive` now false.
-      buyActivation({ pointerServed, inactive: false, onBuy, setPressed: vi.fn() }).click({ detail: 0 });
+      render(true).pointerDown({ pointerId: 1 });
+      // The re-render. Same ref boxes, same element, `inactive` now false.
+      render(false).pointerUp(up(centre.x, centre.y));
+
+      expect(onBuy).not.toHaveBeenCalled();
+    });
+
+    it('does not let it bank one for the trailing click either', () => {
+      const onBuy = vi.fn();
+      const pointerServed = { current: false };
+      const armedPointerId: { current: number | null } = { current: null };
+      const render = (inactive: boolean) =>
+        buyActivation({ pointerServed, armedPointerId, inactive, onBuy, setPressed: vi.fn() });
+
+      render(true).pointerDown({ pointerId: 1 });
+      render(false).click({ detail: 0 });
+
+      expect(onBuy).not.toHaveBeenCalled();
+    });
+
+    it('withholds the purchase when the button goes dead while the finger is down', () => {
+      // The other direction: live at the press, maxed out by the release,
+      // because something else spent the money or finished the upgrade.
+      const onBuy = vi.fn();
+      const pointerServed = { current: false };
+      const armedPointerId: { current: number | null } = { current: null };
+      const render = (inactive: boolean) =>
+        buyActivation({ pointerServed, armedPointerId, inactive, onBuy, setPressed: vi.fn() });
+
+      render(false).pointerDown({ pointerId: 1 });
+      render(true).pointerUp(up(centre.x, centre.y));
 
       expect(onBuy).not.toHaveBeenCalled();
     });
