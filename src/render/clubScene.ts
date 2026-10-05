@@ -606,6 +606,12 @@ export class ClubScene {
       for (let i = 0; i < art.pips.length; i += 1) {
         const pip = art.pips[i]!;
         const earned = i < stars;
+        // Filled vs hollow, not gold vs grey. The tint stays as the second
+        // signal, but shape is the one that survives greyscale — §9 — and it
+        // makes the tile agree with the ★ burst, which already reads ★ ☆ ☆.
+        // Pixi's texture setter no-ops on an unchanged texture, so re-asserting
+        // this every sync costs nothing.
+        pip.texture = earned ? this.textures.star : this.textures.starOutline;
         pip.tint = earned ? GOLD_VIP : INK_DISABLED;
         pip.alpha = earned ? 1 : 0.5;
       }

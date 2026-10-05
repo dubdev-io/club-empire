@@ -60,10 +60,11 @@ export function Sheet({ title, subtitle, onClose, children }: SheetProps): React
  * that feels connected and one that feels dead. Criterion 2 is a 100 ms
  * budget — `click` alone can miss it on its own.
  *
- * Unaffordable is signalled two ways, because §9 forbids colour alone: a lock
- * glyph before the price, and the price itself in `--ink-disabled`. The
- * `aria-disabled` opacity is not one of them — `inactive` is `disabled ||
- * isDone`, never `!affordable`, so an unaffordable button keeps full opacity.
+ * Unaffordable is signalled two ways. Only the lock glyph before the price is
+ * non-colour, and that is the one §9 requires; the price in `--ink-disabled` is
+ * the colour half of the pair. The `aria-disabled` opacity is not a third —
+ * `inactive` is `disabled || isDone`, never `!affordable`, so an unaffordable
+ * button keeps full opacity.
  */
 export interface BuyButtonProps {
   readonly label: string;

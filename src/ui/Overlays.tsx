@@ -83,13 +83,23 @@ export function StarBurst(): React.JSX.Element | null {
       onPointerDown={() => setStar(null)}
     >
       <div className="star-burst__panel">
-        <div className="star-burst__stars" aria-hidden="true">
+        {/* Labelled on the wrapper with the glyphs hidden, the same way the bar
+            list's <Stars> does it. Hiding the row outright left this `role=status`
+            announcing "×2 drink price, Tap Bar · Lv 10" identically at one, two
+            and three stars — the count, which is the thing being celebrated,
+            never reached a screen reader. `role="img"` because an `aria-label`
+            on a bare <div> is not reliably exposed. */}
+        <div className="star-burst__stars" role="img" aria-label={`${star.stars} of 3 stars`}>
           {/* Same rule as the bar list's <Stars>: earned and unearned differ in
               glyph, not only in colour (§9). Gold against --ink-disabled is
               2.12:1, so a filled ★ in both states left this celebration
               reading its own state by hue alone. */}
           {[0, 1, 2].map((i) => (
-            <span key={i} className={i < star.stars ? 'star-burst__on' : 'star-burst__off'}>
+            <span
+              key={i}
+              className={i < star.stars ? 'star-burst__on' : 'star-burst__off'}
+              aria-hidden="true"
+            >
               {i < star.stars ? '★' : '☆'}
             </span>
           ))}
