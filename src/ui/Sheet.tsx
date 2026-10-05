@@ -172,9 +172,11 @@ export function BuyButton({
       // it fires neither, and the class would stick.
       onPointerCancel={activation.pointerEnd}
       onPointerLeave={activation.pointerEnd}
-      // Focus can be taken while a key is held — the row this button sits in is
-      // replaced by the purchase itself — and then the `keyup` never arrives
-      // here and the press class would stick.
+      // Focus can be taken while a key is held — a click elsewhere, or the row
+      // this button sits in being replaced by the purchase itself — and then
+      // the `keyup` never arrives here. Without this the press class sticks,
+      // and so does the held key's suppression of clicks it will never make
+      // again, which costs the next synthetic activation its purchase.
       onBlur={activation.cancelPress}
       // The keyboard's three events. Neither key event buys: they set the press
       // treatment, and they tell the click handler whether the click on its way
