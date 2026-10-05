@@ -72,8 +72,20 @@ describe('the inlined fallback carries the loading indicators itself', () => {
 
   it('has a progress bar revealed on the brief 1 s threshold', () => {
     expect(indexHtml).toMatch(/data-progress/);
-    // The reveal is a 1 s animation delay — the only way to time it without JS.
-    expect(indexHtml).toMatch(/animation:\s*bf-reveal[^;]*\b1s\b/);
+    // The reveal is an animation — the only way to time it without JS — and the
+    // same shape as the React bar it hands over to: one cycle covering the wait
+    // and the fade, with the threshold expressed as a keyframe offset.
+    expect(indexHtml).toMatch(
+      new RegExp(`animation:\\s*bf-reveal\\s+${BOOT_PROGRESS_CYCLE_MS}ms[^;]*\\bboth\\b`),
+    );
+    expect(indexHtml).toMatch(/@keyframes bf-reveal\s*\{\s*0%,\s*83\.333%/);
+  });
+
+  it('keeps the hidden frames in the keyframes, not on the rule', () => {
+    // Same reason as `.boot__progress`: an `opacity: 0` base turns "animations
+    // unsupported" into a progress bar nobody can ever see — the DUB-21 defect
+    // arriving by another route. Both copies now fail to *visible* instead.
+    expect(indexHtml).not.toMatch(/\.bf-progress\s*\{[^}]*opacity:\s*0/);
   });
 
   it('still has the club silhouette that stops the white flash', () => {

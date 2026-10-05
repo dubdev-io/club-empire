@@ -83,18 +83,27 @@
         }
       }
 
-      /* "A progress bar appears if the load exceeds 1 s" — expressed as a 1 s
-         animation delay, because without JS there is nothing to time it with.
-         A load that finishes first never shows the bar at all, which is the
-         point: a bar that flashes for 200 ms reads as a glitch. */
+      /* "A progress bar appears if the load exceeds 1 s" — expressed as an
+         animation, because without JS there is nothing to time it with. A load
+         that finishes first never shows the bar at all, which is the point: a
+         bar that flashes for 200 ms reads as a glitch.
+
+         One 1.2 s animation with the hidden frames *inside* the keyframes,
+         rather than `opacity: 0` on the rule and a 200 ms fade behind a 1 s
+         delay. Same shape, and the same reasons, as `boot-progress-reveal` in
+         `ui.css` — which this hands over to, and which has to agree with it to
+         the frame. An `opacity: 0` base turns "animations unsupported" into a
+         progress bar nobody can ever see; with the base opaque that case fails
+         to a bar visible from the first frame instead. On a fast load that is a
+         brief flash, which is the lesser of the two: a glitch is a thing you
+         noticed, and an invisible bar is the DUB-21 defect by another route. */
       #boot-fallback .bf-progress {
         width: 50%;
         height: 4px;
         background: #231f3a;
         border-radius: 999px;
         overflow: hidden;
-        opacity: 0;
-        animation: bf-reveal 200ms linear 1s forwards;
+        animation: bf-reveal 1200ms linear both;
       }
 
       /* Indeterminate on purpose: before the bundle runs there is no number to
@@ -108,8 +117,17 @@
         animation: bf-sweep 1.4s ease-in-out infinite;
       }
 
+      /* 83.333% of 1200ms is the 1 s threshold; the fade is the remaining
+         200 ms. The literals are duplicated in `ui.css`, and `bootScreen.test.ts`
+         asserts the two agree — a custom property cannot cross into a style
+         block that is inlined before any stylesheet exists. */
       @keyframes bf-reveal {
-        to {
+        0%,
+        83.333% {
+          opacity: 0;
+        }
+
+        100% {
           opacity: 1;
         }
       }
