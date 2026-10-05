@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useGameStore } from '../state/store.ts';
+import { activationProps } from './activation.ts';
 import { Sheet } from './Sheet.tsx';
 
 /**
@@ -9,6 +10,13 @@ import { Sheet } from './Sheet.tsx';
  * reduced-motion** (haptics rides along because §9 requires the 10 ms vibrate
  * to sit behind a toggle). No account, no cloud save, no difficulty, no
  * language. The list being short is the feature.
+ *
+ * Every control in here had DUB-59's bug too, and none of them is in that
+ * ticket's table — until the bottom-bar tabs were fixed, nobody on a keyboard
+ * could open this sheet to find them. Four more `pointerdown`-only buttons,
+ * including the one that deletes the save, and three of them carrying
+ * `role="switch"` and `aria-checked`: announced to a screen reader as toggles
+ * it could flip, and unflippable.
  */
 export function SettingsSheet(): React.JSX.Element {
   const closeSheet = useGameStore((s) => s.closeSheet);
@@ -62,20 +70,28 @@ export function SettingsSheet(): React.JSX.Element {
         */}
         {confirmingReset ? (
           <div className="settings-reset__confirm">
+            {/*
+              The one action in the app that is destructive and unrecoverable,
+              which is why it is behind the reveal above and why the key-repeat
+              guard in `activation.ts` matters here more than anywhere: a
+              leaned-on Enter must not delete the club it has just revealed.
+            */}
             <button
               type="button"
               className="cta cta--danger"
-              onPointerDown={() => {
-                actions.resetSave();
-                setConfirmingReset(false);
-              }}
+              {...activationProps({
+                onAct: () => {
+                  actions.resetSave();
+                  setConfirmingReset(false);
+                },
+              })}
             >
               Delete my club
             </button>
             <button
               type="button"
               className="cta cta--quiet"
-              onPointerDown={() => setConfirmingReset(false)}
+              {...activationProps({ onAct: () => setConfirmingReset(false) })}
             >
               Keep it
             </button>
@@ -84,7 +100,7 @@ export function SettingsSheet(): React.JSX.Element {
           <button
             type="button"
             className="cta cta--quiet"
-            onPointerDown={() => setConfirmingReset(true)}
+            {...activationProps({ onAct: () => setConfirmingReset(true) })}
           >
             Reset club…
           </button>
@@ -120,6 +136,9 @@ interface ToggleProps {
  * §9: never signal state by colour alone. A knob that slides is a position
  * change, which is fine, but "On"/"Off" next to it means the state survives
  * any rendering, any colour vision, and a screen reader.
+ *
+ * `role="switch"` is also a promise that Enter and Space flip it, which until
+ * DUB-59 it did not keep.
  */
 function Toggle({ label, hint, on, onChange }: ToggleProps): React.JSX.Element {
   return (
@@ -128,7 +147,7 @@ function Toggle({ label, hint, on, onChange }: ToggleProps): React.JSX.Element {
       className="toggle"
       role="switch"
       aria-checked={on}
-      onPointerDown={() => onChange(!on)}
+      {...activationProps({ onAct: () => onChange(!on) })}
     >
       <span className="toggle__text">
         <span className="toggle__label">{label}</span>
