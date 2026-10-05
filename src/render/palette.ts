@@ -23,7 +23,7 @@ export const INK_PRIMARY = 0xf4f1ff;
 /** --ink-secondary */
 export const INK_SECONDARY = 0xa9a2c9;
 /** --ink-disabled */
-export const INK_DISABLED = 0x6b6590;
+export const INK_DISABLED = 0x9089b8;
 /** --neon-magenta */
 export const NEON_MAGENTA = 0xff3d9a;
 /** --neon-cyan */

@@ -724,8 +724,9 @@
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  /* --ink-disabled is non-text elsewhere; here it is paired with the lock
-     glyph so the state is never carried by the colour alone. */
+  /* Dimmer than the label so "you cannot afford this" still reads at a
+     glance, and paired with the lock glyph so the state is never colour
+     alone. */
   color: var(--ink-disabled);
 }
 
