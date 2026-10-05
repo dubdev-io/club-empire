@@ -35,7 +35,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buyActivation,
   createBuyActivationLog,
+  KEY_REPEAT_WINDOW_MS,
   POINTER_CLICK_WINDOW_MS,
+  POINTER_DOWN_MAX_AGE_MS,
 } from './buyActivation.ts';
 import type { ActivationClock } from './buyActivation.ts';
 import { ctaClassName } from './ctaClass.ts';
@@ -239,6 +241,14 @@ describe('buyActivation', () => {
   }
 
   /**
+   * The mouse's `pointerId` is stable for the life of the page; a touch gets a
+   * fresh one per finger and never reuses it. Both facts matter below.
+   */
+  const MOUSE = 1;
+  const FINGER_1 = 12;
+  const FINGER_2 = 13;
+
+  /**
    * One tap, in the order a browser fires it.
    *
    * `pointerup` and `pointerleave` both land before the compatibility `click` —
@@ -248,11 +258,11 @@ describe('buyActivation', () => {
    */
   function tap(
     b: ReturnType<typeof button>,
-    { detail = 1, holdMs = 80, clickAfterMs = 300 } = {},
+    { detail = 1, holdMs = 80, clickAfterMs = 300, pointerId = MOUSE } = {},
   ): void {
-    b.handlers.pointerDown();
+    b.handlers.pointerDown({ pointerId });
     b.clock.advance(holdMs);
-    b.handlers.pointerEnd();
+    b.handlers.pointerEnd({ pointerId });
     b.clock.advance(clickAfterMs);
     b.handlers.click({ detail });
   }
@@ -291,13 +301,13 @@ describe('buyActivation', () => {
   it('buys once on a tap, on the pointer down and not on the click after it', () => {
     const b = button();
 
-    b.handlers.pointerDown();
+    b.handlers.pointerDown({ pointerId: MOUSE });
     // The purchase is already made here — before `pointerup`, let alone before
     // the ~300 ms `click`. That is criterion 2's 100 ms budget.
     expect(b.onBuy).toHaveBeenCalledTimes(1);
 
     b.clock.advance(80);
-    b.handlers.pointerEnd();
+    b.handlers.pointerEnd({ pointerId: MOUSE });
     b.clock.advance(300);
     b.handlers.click({ detail: 1 });
     expect(b.onBuy).toHaveBeenCalledTimes(1);
@@ -388,8 +398,8 @@ describe('buyActivation', () => {
     // only thing standing between the player and a second charge.
     const b = button();
 
-    b.handlers.pointerDown();
-    b.handlers.pointerEnd();
+    b.handlers.pointerDown({ pointerId: MOUSE });
+    b.handlers.pointerEnd({ pointerId: MOUSE });
     for (const key of ['Tab', 'Shift', 'ArrowDown', 'a']) {
       b.handlers.keyDown({ key, repeat: false });
       b.handlers.keyUp({ key, repeat: false });
@@ -419,9 +429,9 @@ describe('buyActivation', () => {
       onBuy,
       setPressed: vi.fn(),
     });
-    first.pointerDown();
+    first.pointerDown({ pointerId: FINGER_1 });
     clock.advance(80);
-    first.pointerEnd();
+    first.pointerEnd({ pointerId: FINGER_1 });
 
     // The re-render that the purchase caused: a new button, a new instance.
     const second = buyActivation({
@@ -447,8 +457,8 @@ describe('buyActivation', () => {
       // behind a screen reader. The window expires on its own.
       const b = button();
 
-      b.handlers.pointerDown();
-      b.handlers.pointerEnd(); // `pointercancel`: the scroll took the gesture.
+      b.handlers.pointerDown({ pointerId: MOUSE });
+      b.handlers.pointerEnd({ pointerId: MOUSE }); // `pointercancel`: the scroll took it.
       expect(b.onBuy).toHaveBeenCalledTimes(1);
 
       b.clock.advance(POINTER_CLICK_WINDOW_MS);
@@ -462,8 +472,8 @@ describe('buyActivation', () => {
       // window being zero.
       const b = button();
 
-      b.handlers.pointerDown();
-      b.handlers.pointerEnd();
+      b.handlers.pointerDown({ pointerId: MOUSE });
+      b.handlers.pointerEnd({ pointerId: MOUSE });
       b.clock.advance(POINTER_CLICK_WINDOW_MS - 1);
       b.handlers.click({ detail: 0 });
 
@@ -476,11 +486,170 @@ describe('buyActivation', () => {
       // the tail of a tap, so it clears the window outright.
       const b = button();
 
-      b.handlers.pointerDown();
-      b.handlers.pointerEnd();
+      b.handlers.pointerDown({ pointerId: MOUSE });
+      b.handlers.pointerEnd({ pointerId: MOUSE });
       pressEnter(b);
 
       expect(b.onBuy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('a held key that gets no `keyup` here (R5)', () => {
+    /**
+     * Hold an activation key until it repeats, then have focus taken — a click
+     * elsewhere with the key still down. React fires `blur`; the `keyup` lands
+     * on whatever is focused now and never reaches this button.
+     */
+    function holdThenLoseFocus(b: ReturnType<typeof button>, key: string): void {
+      b.handlers.keyDown({ key, repeat: false });
+      if (key === 'Enter') b.handlers.click({ detail: 0 });
+      b.clock.advance(33);
+      b.handlers.keyDown({ key, repeat: true });
+      if (key === 'Enter') b.handlers.click({ detail: 0 });
+    }
+
+    it('stops suppressing synthetic activations when the blur ends the press', () => {
+      // R5: the repeat flag's only clear was an activation-key `keyup` on a
+      // button that still exists and still has focus. Take focus mid-hold and
+      // it stood for the rest of the session — every synthetic `click` after
+      // it, which is a screen reader's, bought nothing. The gesture needs one
+      // hand and a mouse: hold Enter on a maxed button, click away, release.
+      const b = button();
+
+      holdThenLoseFocus(b, 'Enter');
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
+
+      b.handlers.cancelPress(); // `blur`: the `keyup` will land elsewhere.
+      b.handlers.click({ detail: 0 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(2);
+    });
+
+    it('expires on its own when neither the `keyup` nor the blur arrives', () => {
+      // `blur` does not fire for an element React unmounts, and a purchase
+      // unmounts its own row. So the clear cannot be the only remedy — the
+      // stamp has to lapse, the way the pointer window does.
+      const b = button();
+
+      holdThenLoseFocus(b, ' ');
+      b.clock.advance(KEY_REPEAT_WINDOW_MS);
+      b.handlers.click({ detail: 0 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('still suppresses a repeat click inside the window', () => {
+      // The other side of that boundary, so the test above cannot pass by the
+      // window being zero — and the reason the window is generous against a
+      // platform's slowest repeat rate rather than tight.
+      const b = button();
+
+      holdThenLoseFocus(b, ' ');
+      b.clock.advance(KEY_REPEAT_WINDOW_MS - 1);
+      b.handlers.click({ detail: 0 });
+
+      expect(b.onBuy).not.toHaveBeenCalled();
+    });
+
+    it('keeps the `keyup` clear, which no window could replace', () => {
+      // Space's one genuine click arrives immediately after its last repeat, so
+      // a window long enough to cover Enter's repeats would swallow it. The
+      // `keyup` is what tells them apart; the window is only the backstop.
+      const b = button();
+
+      pressSpace(b, { repeats: 20 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('two fingers on two buy buttons (R6)', () => {
+    /** `Upgrade` and `+ Lane`, side by side in one `station-row__buys`. */
+    function pair() {
+      const log = createBuyActivationLog();
+      const clock = stopwatch();
+
+      return {
+        clock,
+        upgrade: button({ log, clock }),
+        lane: button({ log, clock }),
+      };
+    }
+
+    it('refreshes the window of the second finger on its own release', () => {
+      // R6: one boolean for every pointer meant the first release consumed it
+      // and the second release refreshed nothing, so the second finger's
+      // compatibility click was measured from a stamp seconds stale and fell
+      // back to `detail` alone. Two thumbs on two buy buttons is how people
+      // play an incremental game, and `detail: 0` here is the touch engine this
+      // module is written not to bet the player's money on.
+      const { clock, upgrade, lane } = pair();
+
+      upgrade.handlers.pointerDown({ pointerId: FINGER_1 });
+      clock.advance(50);
+      lane.handlers.pointerDown({ pointerId: FINGER_2 });
+      expect(upgrade.onBuy).toHaveBeenCalledTimes(1);
+      expect(lane.onBuy).toHaveBeenCalledTimes(1);
+
+      clock.advance(50);
+      upgrade.handlers.pointerEnd({ pointerId: FINGER_1 });
+      upgrade.handlers.click({ detail: 0 });
+
+      // Finger 2 held two seconds longer, well past the window measured from
+      // its own `pointerdown`.
+      clock.advance(2_000);
+      lane.handlers.pointerEnd({ pointerId: FINGER_2 });
+      clock.advance(300);
+      lane.handlers.click({ detail: 0 });
+
+      expect(upgrade.onBuy).toHaveBeenCalledTimes(1);
+      expect(lane.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let the release of one finger suppress a fresh tap by the other', () => {
+      // The opposite error: per-pointer bookkeeping must not become a reason to
+      // swallow a genuine second activation.
+      const { clock, upgrade, lane } = pair();
+
+      tap(upgrade, { pointerId: FINGER_1 });
+      clock.advance(1_200);
+      tap(lane, { pointerId: FINGER_2 });
+
+      expect(upgrade.onBuy).toHaveBeenCalledTimes(1);
+      expect(lane.onBuy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a pointer whose release never reaches a handler (N1)', () => {
+    it('does not let a passing cursor open a window no press opened', () => {
+      // The R3 teardown turned on its own gate: the detached element keeps
+      // implicit capture, so its `pointerup` reaches no handler and the entry
+      // is left standing. The mouse's `pointerId` is stable, so a cursor merely
+      // crossing a buy button later would find that entry, pass the gate and
+      // open a full window — the exact thing the gate exists to prevent.
+      const b = button();
+
+      b.handlers.pointerDown({ pointerId: MOUSE });
+      b.clock.advance(POINTER_DOWN_MAX_AGE_MS);
+
+      // `pointerleave`, no press: the cursor just went over the button.
+      b.handlers.pointerEnd({ pointerId: MOUSE });
+      b.handlers.click({ detail: 0 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(2);
+    });
+
+    it('leaves the press class alone, which may belong to a key (N2)', () => {
+      // `pointerleave` fires whenever the cursor crosses the button. Clearing
+      // the class there unconditionally dropped `.cta--pressed` mid-keypress.
+      const b = button();
+
+      b.handlers.keyDown({ key: 'Enter', repeat: false });
+      expect(b.setPressed).toHaveBeenLastCalledWith(true);
+
+      b.handlers.pointerEnd({ pointerId: MOUSE });
+
+      expect(b.setPressed).toHaveBeenLastCalledWith(true);
     });
   });
 
@@ -549,7 +718,9 @@ describe('buyActivation', () => {
       const clock = stopwatch();
       const onBuy = vi.fn();
 
-      buyActivation({ log, clock, inactive: true, onBuy, setPressed: vi.fn() }).pointerDown();
+      buyActivation({ log, clock, inactive: true, onBuy, setPressed: vi.fn() }).pointerDown({
+        pointerId: MOUSE,
+      });
       clock.advance(380);
       // The re-render. Same log, same element, `inactive` now false.
       buyActivation({ log, clock, inactive: false, onBuy, setPressed: vi.fn() }).click({

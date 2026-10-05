@@ -36,6 +36,16 @@
  * that cannot be fooled by a touch engine's `detail` value get the veto, and
  * `detail` rules out the clicks they cannot see.
  *
+ * **Every one of the three is a window, never a flag.** Twice now a guard was
+ * written as a boolean cleared by an event that is not guaranteed to arrive —
+ * the pointer gate a `pointercancel` orphaned (R4), then the key-repeat gate a
+ * mid-hold `blur` orphaned (R5) — and both times the cost fell on the input
+ * that has no other way in: a synthetic `click` with no pointer and no key
+ * behind it, which is a screen reader's. A guard that spends the player's money
+ * when it is absent must be able to expire when its clearing event never comes.
+ * Both are stamps now, and each has the event that normally clears it *plus* a
+ * backstop duration.
+ *
  * **Accepted residual.** A synthetic `click` carrying `detail !== 0` with no
  * pointer events behind it — voice control and some switch-access software
  * dispatch a real `MouseEvent` rather than calling `element.click()` — is
@@ -68,6 +78,40 @@
  * miserable thing to debug from behind a screen reader.
  */
 export const POINTER_CLICK_WINDOW_MS = 1000;
+
+/**
+ * How long after the last auto-repeat of a held activation key a `click` is
+ * still read as that repeat's, when no `keyup` and no `blur` ever arrive.
+ *
+ * This is only a backstop. The repeat stamp's real clear is the `keyup`, and it
+ * has to stay: a held Space's one genuine click arrives immediately after the
+ * last repeat, so any duration long enough to cover Enter's repeat clicks would
+ * also swallow Space's real one. The stamp earns its keep in the case where
+ * neither clearing event comes — focus taken mid-hold by a React unmount, which
+ * fires no `blur` — and it needs to outlast only the gap between two repeats.
+ * The slowest rate a platform offers is about 2 Hz (macOS) or 2.5 Hz (Windows),
+ * so the gap to cover is ~500 ms and this is double it.
+ */
+export const KEY_REPEAT_WINDOW_MS = 1000;
+
+/**
+ * How old a `pointerdown` of ours may be and still have its release refresh the
+ * window (N1).
+ *
+ * A pointer whose release never reaches a handler leaves its entry in
+ * `downPointers` — a purchase can tear the capture target down mid-press. A
+ * touch id never recurs, so a stale touch entry is inert, but the mouse's
+ * `pointerId` is stable: without a cap, a cursor merely crossing any buy button
+ * minutes later would find the stale entry, pass the gate and open a window no
+ * press opened, which is the one thing the gate exists to prevent.
+ *
+ * Long rather than tight, because the two errors are not equal: too long only
+ * narrows N1, while too short refuses to refresh a genuine slow release and
+ * puts its compatibility click back on `detail` alone. Thirty seconds is beyond
+ * any press a player makes on purpose and well under the age of the stale
+ * entries this is here for.
+ */
+export const POINTER_DOWN_MAX_AGE_MS = 30_000;
 
 /** `performance.now()` in the app; a controllable counter in a test. */
 export interface ActivationClock {
@@ -108,23 +152,40 @@ export interface BuyActivationLog {
    */
   pointerServedAt: number;
   /**
-   * Whether a `pointerdown` we served has not yet ended.
+   * The pointers currently down on a buy button, each against the clock reading
+   * of its `pointerdown`.
    *
-   * The reason the stamp is not simply refreshed by every `pointerleave`: on a
-   * desktop that event fires whenever the mouse crosses the button, pressed or
-   * not, and a window reopened by a passing cursor would swallow a synthetic
+   * It is a map and not a boolean because the log is shared by every button and
+   * a phone has more than one finger (R6). `BarsSheet` puts `Upgrade` and
+   * `+ Lane` side by side in one row, and two thumbs on two buy buttons is how
+   * people play an incremental game. With one slot the first release consumed
+   * it and the second release refreshed nothing, so the second finger's
+   * compatibility click fell back to `detail` alone — the assumption about a
+   * touch engine that this module is written not to bet money on.
+   *
+   * Its presence is also the gate on refreshing the window, which is why the
+   * entry is needed at all rather than just a count: on a desktop
+   * `pointerleave` fires whenever the mouse crosses the button, pressed or not,
+   * and a window reopened by a passing cursor would swallow a synthetic
    * activation for a second at a time.
    */
-  pointerDown: boolean;
+  downPointers: Map<number, number>;
   /**
-   * Set while the activation key currently held is repeating, so the `click`
-   * the repeat synthesises can be told from a fresh press.
+   * Clock reading of the most recent auto-repeat of a held activation key, or
+   * `-Infinity` when no key is repeating — so the `click` a repeat synthesises
+   * can be told from a fresh press.
+   *
+   * A stamp and not a boolean for the reason in the header: as a boolean its
+   * only clear was an activation-key `keyup` on a button that still exists and
+   * still has focus, and a hold interrupted by a blur or an unmount left it
+   * standing for the rest of the session, vetoing every synthetic activation
+   * (R5). See `KEY_REPEAT_WINDOW_MS`.
    */
-  keyRepeating: boolean;
+  keyRepeatingAt: number;
 }
 
 export function createBuyActivationLog(): BuyActivationLog {
-  return { pointerServedAt: -Infinity, pointerDown: false, keyRepeating: false };
+  return { pointerServedAt: -Infinity, downPointers: new Map(), keyRepeatingAt: -Infinity };
 }
 
 /** The one log every `BuyButton` shares. See `BuyActivationLog`. */
@@ -138,6 +199,16 @@ export const buyActivationLog = createBuyActivationLog();
  */
 export interface ActivationClick {
   readonly detail: number;
+}
+
+/**
+ * The only field of a pointer event this decision reads.
+ *
+ * `React.PointerEvent` has it, so the component passes its handlers straight
+ * through as before and a test passes `{ pointerId: 1 }`.
+ */
+export interface ActivationPointer {
+  readonly pointerId: number;
 }
 
 /** The two fields of a `keydown`/`keyup` this decision reads. */
@@ -170,13 +241,13 @@ export interface BuyActivationInput {
 }
 
 export interface BuyActivationHandlers {
-  readonly pointerDown: () => void;
+  readonly pointerDown: (event: ActivationPointer) => void;
   /** `pointerup`, `pointercancel`, `pointerleave`. */
-  readonly pointerEnd: () => void;
+  readonly pointerEnd: (event: ActivationPointer) => void;
   readonly keyDown: (event: ActivationKey) => void;
   readonly keyUp: (event: ActivationKey) => void;
   readonly click: (event: ActivationClick) => void;
-  /** `blur`: drop the press treatment, and nothing else. */
+  /** `blur`: end a key press that will get no `keyup` here. */
   readonly cancelPress: () => void;
 }
 
@@ -188,7 +259,7 @@ export function buyActivation({
   setPressed,
 }: BuyActivationInput): BuyActivationHandlers {
   return {
-    pointerDown: () => {
+    pointerDown: (event) => {
       // Unconditionally, and before the purchase: the tap that buys nothing is
       // exactly the one DUB-38 found this button swallowing.
       setPressed(true);
@@ -196,7 +267,7 @@ export function buyActivation({
       // either way, and by then the button may be affordable — the purchase
       // this event could not make is not one the click should make for it.
       log.pointerServedAt = clock.now();
-      log.pointerDown = true;
+      log.downPointers.set(event.pointerId, clock.now());
       if (!inactive) onBuy();
     },
 
@@ -211,12 +282,22 @@ export function buyActivation({
      * least sure about. Refreshing is also what holds a long press to one
      * purchase: held for three seconds, its click is 3.3 s after the
      * `pointerdown` and outside any window measured from that.
+     *
+     * Per pointer, so that a second finger's release refreshes the window its
+     * own click will be measured against and not the first finger's (R6). A
+     * pointer with no entry is one whose `pointerdown` this log never saw — a
+     * cursor crossing the button — and it changes nothing, including the press
+     * class, which may belong to a key currently held (N2).
      */
-    pointerEnd: () => {
-      if (log.pointerDown) {
-        log.pointerServedAt = clock.now();
-        log.pointerDown = false;
-      }
+    pointerEnd: (event) => {
+      const downAt = log.downPointers.get(event.pointerId);
+      if (downAt === undefined) return;
+      log.downPointers.delete(event.pointerId);
+      // An entry older than any real press is one whose release never reached
+      // a handler, left behind by a purchase tearing its own button down. There
+      // is no click coming for it, and refreshing on a stale one is how a
+      // passing cursor would open a window no press opened (N1).
+      if (clock.now() - downAt < POINTER_DOWN_MAX_AGE_MS) log.pointerServedAt = clock.now();
       setPressed(false);
     },
 
@@ -239,8 +320,12 @@ export function buyActivation({
      */
     keyDown: (event) => {
       if (!isActivationKey(event)) return;
-      log.keyRepeating = event.repeat === true;
-      if (!log.keyRepeating) log.pointerServedAt = -Infinity;
+      if (event.repeat === true) {
+        log.keyRepeatingAt = clock.now();
+      } else {
+        log.keyRepeatingAt = -Infinity;
+        log.pointerServedAt = -Infinity;
+      }
       // The press treatment, for the same reason the pointer sets it rather
       // than leaving it to `:active`: this button must answer every press, and
       // on a dead-end one CSS is otherwise the only answer there is. `:active`
@@ -259,7 +344,7 @@ export function buyActivation({
      */
     keyUp: (event) => {
       if (!isActivationKey(event)) return;
-      log.keyRepeating = false;
+      log.keyRepeatingAt = -Infinity;
       setPressed(false);
     },
 
@@ -267,16 +352,28 @@ export function buyActivation({
       // The pointer path already transacted, on `pointerdown`.
       if (clock.now() - log.pointerServedAt < POINTER_CLICK_WINDOW_MS) return;
       if (event.detail !== 0) return;
-      if (log.keyRepeating) return;
+      if (clock.now() - log.keyRepeatingAt < KEY_REPEAT_WINDOW_MS) return;
 
       if (!inactive) onBuy();
     },
 
-    // Focus can be taken while a key is held — the purchase replaces the row
-    // the button is in — and then no `keyup` reaches this button at all and the
-    // press class would stick. Nothing about the pointer window changes here:
-    // a blur is not the end of a pointer activation.
+    /*
+     * `blur`. Focus can be taken while a key is held — a click elsewhere, or
+     * the purchase replacing the row this button is in — and then no `keyup`
+     * reaches this button at all.
+     *
+     * So this ends the key press in both of its effects: the class, which would
+     * otherwise stick, and the repeat stamp, which as a bare flag stood for the
+     * rest of the session and vetoed every synthetic activation after it (R5).
+     * It is the clear for the gesture you can make with one hand and a mouse:
+     * hold Enter on a maxed button, click away, release.
+     *
+     * Nothing about the pointer window changes here — a blur is not the end of
+     * a pointer activation, and the compatibility click of a tap that moved
+     * focus is still on its way.
+     */
     cancelPress: () => {
+      log.keyRepeatingAt = -Infinity;
       setPressed(false);
     },
   };
