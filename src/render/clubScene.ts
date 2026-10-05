@@ -1155,12 +1155,17 @@ export class ClubScene {
     }
 
     // ★ pips, above the counter so they read as the bar's rating.
+    //
+    // 14 rather than 12, with the spacing raised to 18 in step so the 4 px gap
+    // between pips survives. An unearned pip is a hollow star now, and its
+    // interior is what carries that — two more pixels across the body is the
+    // difference between a ☆ and a ★ with a dot in it on a 2x phone.
     const pips: Sprite[] = [];
     for (let i = 0; i < 3; i += 1) {
       const pip = sprite(root, this.textures.star, INK_DISABLED);
       pip.anchor.set(0.5);
-      pip.position.set(slot.x + slot.width / 2 + (i - 1) * 16, slot.y + slot.height - 9);
-      pip.setSize(12, 12);
+      pip.position.set(slot.x + slot.width / 2 + (i - 1) * 18, slot.y + slot.height - 9);
+      pip.setSize(14, 14);
       pips.push(pip);
     }
 

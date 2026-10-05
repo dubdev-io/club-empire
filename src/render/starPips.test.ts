@@ -67,7 +67,16 @@ describe('the ★ pip textures', () => {
   it('strokes the outline inside the path, so it bakes to the filled star’s box', () => {
     const outline = bakeSource('starOutline');
     expect(outline).toMatch(/\.stroke\(\{[^}]*\balignment:\s*1\b/);
-    expect(outline).toMatch(/\bwidth:\s*4\b/);
+  });
+
+  it('keeps the stroke thin enough to leave the star hollow', () => {
+    // Taken inwards, the stroke eats the body from both sides at once, and the
+    // body inside the waist is only ~13 units across. At width 4 the ☆ baked as
+    // a near-solid star with a notch in it — measured at 18.0% ink against the
+    // filled pip's 22.6%, where the shipped width 2 reads 11.4% against 23.8%.
+    const width = /\.stroke\(\{[^}]*\bwidth:\s*([\d.]+)/.exec(bakeSource('starOutline'))?.[1];
+    expect(width, 'starOutline should declare a stroke width').toBeDefined();
+    expect(Number(width)).toBeLessThanOrEqual(2.5);
   });
 });
 

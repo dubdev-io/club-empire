@@ -14,3 +14,6 @@ npm-debug.log*
 # Screenshot output from `npm run shots`. Regenerable, 2 MB of binaries, and
 # the design review happens on the ticket where they are attached — not here.
 screenshots/
+
+# Same, for the ★ pip captures from `npm run shots:pips`.
+pipshots/
