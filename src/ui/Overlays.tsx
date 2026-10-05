@@ -84,9 +84,13 @@ export function StarBurst(): React.JSX.Element | null {
     >
       <div className="star-burst__panel">
         <div className="star-burst__stars" aria-hidden="true">
+          {/* Same rule as the bar list's <Stars>: earned and unearned differ in
+              glyph, not only in colour (§9). Gold against --ink-disabled is
+              2.12:1, so a filled ★ in both states left this celebration
+              reading its own state by hue alone. */}
           {[0, 1, 2].map((i) => (
             <span key={i} className={i < star.stars ? 'star-burst__on' : 'star-burst__off'}>
-              ★
+              {i < star.stars ? '★' : '☆'}
             </span>
           ))}
         </div>
