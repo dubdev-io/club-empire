@@ -19,6 +19,34 @@
   box-sizing: border-box;
 }
 
+/*
+ * The focus ring — one rule, document-wide (DUB-50).
+ *
+ * Deliberately not a list of component selectors. A per-class list is a list
+ * someone forgets to extend, and the way this ticket was raised was `grep -rn
+ * focus src/` returning nothing at all while four kinds of control shipped. A
+ * bare `:focus-visible` cannot be forgotten: it already only matches things the
+ * browser considers focusable, so the next button added to the game inherits
+ * the ring without anyone remembering to ask for it.
+ *
+ * `:focus-visible` and not `:focus`. The game's controls fire on `pointerdown`
+ * and a mouse press focuses the button it lands on, so a `:focus` rule would
+ * leave a ring sitting on the last thing a mouse player clicked — which is the
+ * state everyone recognises as a bug and then "fixes" by deleting focus styles
+ * altogether.
+ *
+ * `outline`, not `box-shadow`: it is the one property that draws outside the
+ * layout box *and* follows `border-radius`, and the inset box-shadow slot is
+ * already spent on the DUB-38 press. The two states have to be legible at the
+ * same time, because a keyboard player holding Space is both.
+ *
+ * The values are tokens; the reasoning behind them is in `tokens.css`.
+ */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
 html,
 body {
   margin: 0;

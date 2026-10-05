@@ -88,6 +88,41 @@
   /* Bottom sheets cap at 70% of the viewport. */
   --sheet-max-height: 70dvh;
 
+  /* --- focus ring (DUB-50) -------------------------------------------- */
+  /*
+   * The keyboard's "you are here", and the one treatment that must not be
+   * confusable with the DUB-38 press.
+   *
+   * Geometry carries that distinction, not hue: the press is a 2px ring *inset*
+   * into the button (`box-shadow: inset 0 0 0 2px var(--ink-primary)`), and this
+   * is an `outline` sitting *outside* it. A button that is focused and held at
+   * once therefore reads white, then `--focus-ring-offset` of the card colour,
+   * then white again — two rings with a gap, not one thick band. `outline` also
+   * sits outside the layout box, so unlike a wider `border` it cannot shove the
+   * label and the price sideways.
+   *
+   * Contrast, measured against the three surfaces a ring can land on:
+   * `--ink-primary` is 14.2:1 on `--bg-raised` (the station card), 16.1:1 on
+   * `--bg-surface` (the sheet) and 17.7:1 on `--bg-room` — all far past the 3:1
+   * WCAG 1.4.11 asks of a non-text indicator. The accent *fills* are the hard
+   * surface (the same white is 1.4:1 on `--neon-cyan`), which is why a non-zero
+   * offset is mandatory rather than decorative: it keeps the ring on the card
+   * and off the fill, so the fill's colour never enters the measurement.
+   *
+   * Width plus offset is how far the ring reaches past the element's edge, and
+   * 2.4.11 (focus not obscured) makes that a budget rather than a free choice.
+   * The tightest container in the game is `.bottom-bar` — 8 px of padding above
+   * the three bar buttons — so the reach has to stay under that, which is why
+   * the offset is 3px and not `--space-1`. `focusRing.test.ts` holds it there.
+   */
+  --focus-ring-width: 3px;
+  --focus-ring-offset: 3px;
+  --focus-ring-color: var(--ink-primary);
+  /* Derived, so the reach is never written twice. Scroll containers use it as
+     `scroll-padding`, so scrolling a focused control into view cannot park it
+     flush against a clipping edge with its ring outside. */
+  --focus-ring-reach: calc(var(--focus-ring-width) + var(--focus-ring-offset));
+
   /* --- device safe area ----------------------------------------------- */
   /* CSS writes the four insets into custom properties so JS can read them
      back as numbers (see src/render/safeArea.ts). */
