@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
+import { useGameStore } from '../state/store.ts';
 import { ctaClassName } from './ctaClass.ts';
 
 /**
@@ -115,6 +116,16 @@ export function BuyButton({
     setPressed(false);
   };
 
+  /*
+   * The resolved flag, not the OS query (DUB-49).
+   *
+   * `store.reducedMotion` is `prefers-reduced-motion` already composed with the
+   * Settings toggle, so this is the one signal that honours a player who said
+   * `on` or `off` out loud. The press scale was previously suppressed by a bare
+   * media query in `ui.css` that never saw the toggle at all.
+   */
+  const still = useGameStore((s) => s.reducedMotion);
+
   return (
     <button
       type="button"
@@ -122,7 +133,7 @@ export function BuyButton({
       // badge stay readable, because the disabled dim cannot sit on a button
       // that contains a child which must clear 4.5:1, so that row dims its
       // label instead. See `.cta--maxed` in ui.css.
-      className={ctaClassName({ accent, affordable, inactive, maxed: isDone, pressed })}
+      className={ctaClassName({ accent, affordable, inactive, maxed: isDone, pressed, still })}
       // Not `disabled`: a disabled button takes no pointer events and gets no
       // `:active` either, so an unaffordable one would answer a tap with
       // nothing at all — and §9 requires every tap to produce a visible

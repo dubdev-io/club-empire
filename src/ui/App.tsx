@@ -5,6 +5,12 @@ import { BottomBar } from './BottomBar.tsx';
 import { DoorSheet } from './DoorSheet.tsx';
 import { Hud } from './Hud.tsx';
 import {
+  applyMotionRootClass,
+  MOTION_MOVING_CLASS,
+  MOTION_STILL_CLASS,
+  resolveReducedMotion,
+} from './motion.ts';
+import {
   Banners,
   BootScreen,
   ClubComplete,
@@ -35,6 +41,10 @@ export function App(): React.JSX.Element {
   const landscape = useLandscape();
 
   useReducedMotionSync();
+  // After `useReducedMotionSync`, deliberately: its effect runs first and the
+  // hook below reads the store directly, so the first class it writes is the
+  // resolved value rather than the store's `false` default.
+  useMotionRootClass();
   useOverlayDismissal();
 
   // Checked before everything: there is no point rendering a HUD over a canvas
@@ -111,28 +121,54 @@ function matchRotatePrompt(): boolean {
  *
  * `auto` follows the OS; `on`/`off` override it. The resolved boolean is what
  * the renderer and every component read, so neither has to know about the
- * three-state setting.
+ * three-state setting. The rule itself lives in `motion.ts` as a pure function
+ * — this hook only decides *when* to re-run it.
+ *
+ * The media query is still subscribed to under `on`/`off`, because an override
+ * can be switched back to `auto` at any time and `resolveReducedMotion` would
+ * then need an OS answer that is current rather than one read at mount.
  */
 function useReducedMotionSync(): void {
   const preference = useGameStore((s) => s.settings.reducedMotion);
   const setReducedMotion = useGameStore((s) => s.setReducedMotion);
 
   useEffect(() => {
-    if (preference === 'on') {
-      setReducedMotion(true);
-      return;
-    }
-    if (preference === 'off') {
-      setReducedMotion(false);
-      return;
-    }
-
     const query = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const update = (): void => setReducedMotion(query.matches);
+    const update = (): void => setReducedMotion(resolveReducedMotion(preference, query.matches));
     update();
     query.addEventListener('change', update);
     return () => query.removeEventListener('change', update);
   }, [preference, setReducedMotion]);
+}
+
+/**
+ * Publish the resolved flag to `<html>`, so the stylesheet can read it.
+ *
+ * `.sheet` and `.card` carry entrance animations and neither component renders
+ * a class list a `--still` flag could join — the sheet is shared by every
+ * panel and the card by two overlays. Two root classes are less plumbing than
+ * threading a prop through both, and they are what keeps the `@media` fallback
+ * in `ui.css` honest: see `motion.ts` for why "motion is allowed" has to be
+ * stated rather than implied.
+ *
+ * Driven from a store subscription rather than a render snapshot — the shape
+ * `runtime.ts` already uses to feed the Pixi scene — so the class cannot lag a
+ * render behind the value it mirrors.
+ */
+function useMotionRootClass(): void {
+  useEffect(() => {
+    const root = document.documentElement;
+    applyMotionRootClass(root, useGameStore.getState().reducedMotion);
+
+    const unsubscribe = useGameStore.subscribe((state, previous) => {
+      if (state.reducedMotion !== previous.reducedMotion) applyMotionRootClass(root, state.reducedMotion);
+    });
+
+    return () => {
+      unsubscribe();
+      root.classList.remove(MOTION_STILL_CLASS, MOTION_MOVING_CLASS);
+    };
+  }, []);
 }
 
 /**

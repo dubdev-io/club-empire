@@ -79,6 +79,26 @@ const PRESS_CTA = `((prefix) => () => {
 })`;
 
 /**
+ * Flip a Settings toggle by its label, through the control a player taps.
+ *
+ * `setSettings` would be shorter and would miss the point. DUB-49 was two
+ * sources of truth for reduced motion that disagreed, and the row that failed —
+ * toggle `on`, OS preference unset — cannot be reached by CDP media emulation
+ * at all. The toggle has to be the thing that moves, and it has to move the way
+ * a thumb moves it: `Toggle` fires on `pointerdown`.
+ *
+ * Interpolated into a `drive` the same way `PRESS_CTA` is, because the Settings
+ * sheet it reaches into is opened by that same `drive`.
+ */
+const TAP_TOGGLE = `((label) => () => {
+  const toggle = [...document.querySelectorAll('.toggle')].find(
+    (el) => (el.querySelector('.toggle__label')?.textContent ?? '') === label,
+  );
+  if (!toggle) throw new Error('no .toggle labelled ' + label);
+  toggle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true }));
+})`;
+
+/**
  * A mid-run club, as a v3 save.
  *
  * Written through `localStorage` rather than built by clicking, so the
@@ -450,6 +470,63 @@ const SHOTS: readonly Shot[] = [
       setTimeout(${PRESS_CTA}('Lv 30'), 400);
     `,
     settleMs: 1200,
+  },
+  {
+    /*
+     * The two rows of DUB-49 that the OS preference alone gets wrong, each one
+     * reached by tapping the real toggle.
+     *
+     * 24 is the accessibility failure: reduced motion switched *on* in Settings
+     * with no OS preference set. The three rules that used to key off a bare
+     * `@media (prefers-reduced-motion: reduce)` never saw that toggle, so the
+     * sheet slid in, the card scaled in, and the button shrank under the thumb
+     * for a player who had asked for none of it. No `reducedMotion: true` here
+     * deliberately — media emulation would hide the bug by answering for the
+     * toggle.
+     *
+     * The sheet left open behind the press is the point as much as the button
+     * is: it is the surface whose entrance animation is the other half of the
+     * fix, and `html.is-still` is what suppresses it.
+     */
+    name: '24-motion-on-via-settings',
+    note: 'reduced motion ON through the Settings toggle, OS preference unset — sheet, card and press all still (DUB-49 row 1)',
+    seed: FRESH,
+    drive: `
+      const s = window.__clubStore.getState();
+      window.__club.grant(60000);
+      s.setStar(null);
+      s.openSheet('settings');
+      setTimeout(${TAP_TOGGLE}('Reduced motion'), 300);
+      setTimeout(() => window.__clubStore.getState().openSheet('bars'), 600);
+      setTimeout(${PRESS_CTA}('Upgrade to Lv'), 1000);
+    `,
+    settleMs: 1600,
+  },
+  {
+    /*
+     * The mirror, and the smaller of the two: reduced motion switched explicitly
+     * *off* against an OS that asks to reduce. The press scale has to come back
+     * — on an affordable (filled) button it is the only button-local press
+     * treatment there is, so suppressing it against the player's word leaves
+     * their thumb with no answer at all.
+     *
+     * `reducedMotion: true` *and* the toggle off is the combination: the media
+     * query says reduce, the player says no, and the player wins.
+     */
+    name: '25-motion-off-via-settings',
+    note: 'reduced motion OFF through the Settings toggle against an OS that asks to reduce — the press scale comes back (DUB-49 row 2)',
+    seed: FRESH,
+    reducedMotion: true,
+    drive: `
+      const s = window.__clubStore.getState();
+      window.__club.grant(60000);
+      s.setStar(null);
+      s.openSheet('settings');
+      setTimeout(${TAP_TOGGLE}('Reduced motion'), 300);
+      setTimeout(() => window.__clubStore.getState().openSheet('bars'), 600);
+      setTimeout(${PRESS_CTA}('Upgrade to Lv'), 1000);
+    `,
+    settleMs: 1600,
   },
 ];
 
