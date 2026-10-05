@@ -22,9 +22,11 @@
   /* --- ink ------------------------------------------------------------ */
   --ink-primary: #f4f1ff;
   --ink-secondary: #a9a2c9;
-  /* Non-text use only, and always paired with a glyph — it does not clear
-     4.5:1 against --bg-surface and is not allowed to carry meaning alone. */
-  --ink-disabled: #6b6590;
+  /* The dim end of the ink ramp: de-emphasised text and unearned/inactive
+     marks. Clears 4.5:1 on all three surfaces (--bg-room, --bg-surface,
+     --bg-raised), so it is allowed on text. It still must never carry
+     meaning by colour alone. */
+  --ink-disabled: #9089b8;
 
   /* --- accents -------------------------------------------------------- */
   --neon-magenta: #ff3d9a;
