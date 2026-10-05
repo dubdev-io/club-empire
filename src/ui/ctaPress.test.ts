@@ -23,15 +23,21 @@
  *    reverted to a background swap between those passes.
  *
  * DUB-51 then added the other half of the same button: the press treatment
- * above is also what a *keypress* gets, via `:active`, and for a while that was
- * all it got — Enter and Space produced a convincing press and bought nothing,
- * because the purchase was on `pointerdown`. `buyActivation` is pure too, so
- * which events transact is the third kind of fact here and the strongest: a
- * real unit test over a real sequence of events.
+ * above is also what a *keypress* gets, and for a while that was all it got —
+ * Enter and Space produced a convincing press and bought nothing, because the
+ * purchase was on `pointerdown`. `buyActivation` is pure too, so which events
+ * transact is the third kind of fact here and the strongest: a real unit test
+ * over a real sequence of events, including the sequences a browser only fires
+ * when a key is held down.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { buyActivation } from './buyActivation.ts';
+import {
+  buyActivation,
+  createBuyActivationLog,
+  POINTER_CLICK_WINDOW_MS,
+} from './buyActivation.ts';
+import type { ActivationClock } from './buyActivation.ts';
 import { ctaClassName } from './ctaClass.ts';
 
 const css = readFileSync(new URL('./ui.css', import.meta.url), 'utf8');
@@ -230,8 +236,8 @@ describe('BuyButton', () => {
 
   it('listens for the keyboard as well, which a pointer handler cannot hear', () => {
     // DUB-51: Enter and Space produce a `click` and no `pointerdown` at all.
-    // `onKeyDown` is what tells the click handler the click is a keypress.
-    for (const handler of ['onClick', 'onKeyDown']) {
+    // The key events are what tell the click handler which click is coming.
+    for (const handler of ['onClick', 'onKeyDown', 'onKeyUp']) {
       expect(sheet).toContain(`${handler}=`);
     }
   });
@@ -239,33 +245,63 @@ describe('BuyButton', () => {
   it('routes every one of them through the one module that decides', () => {
     // Not an aesthetic preference. A handler written inline here is a handler
     // outside the sequence test below, and the whole defect was a sequence.
-    expect(sheet).toContain('buyActivation({ pointerServed, inactive, onBuy, setPressed })');
-    for (const handler of ['pointerDown', 'release', 'keyDown', 'click']) {
+    // Asserted per-name rather than as one source literal: the previous
+    // version pinned the whole call expression and broke on a reformat.
+    expect(sheet).toContain('buyActivation({');
+    for (const handler of ['pointerDown', 'pointerEnd', 'cancelPress', 'keyDown', 'keyUp', 'click']) {
       expect(sheet).toContain(`activation.${handler}`);
     }
+  });
+
+  it('shares one activation log across buttons, because a purchase remounts one', () => {
+    // R3 from the DUB-57 review. Buying `Unlock` in `BarsSheet` replaces the
+    // pressed button with two new ones, so suppression held in a `useRef` is
+    // reset while the compatibility click is still in flight.
+    expect(sheet).toContain('buyActivationLog');
+    expect(sheet).not.toContain('useRef(false)');
   });
 });
 
 /**
- * The purchase itself: exactly one `onBuy` per activation, by either route.
+ * The purchase itself: exactly one `onBuy` per activation, by every route.
  *
- * The two halves pull in opposite directions and that is the whole difficulty.
+ * The halves pull in opposite directions and that is the whole difficulty.
  * Touch must transact on `pointerdown` or it feels dead (DUB-38), the keyboard
- * only ever delivers a `click` (DUB-51), and a tap delivers *both* — so the
- * same button has to answer two events while charging the player once.
+ * only ever delivers a `click` (DUB-51), a tap delivers *both* — so the same
+ * button has to answer two events while charging the player once — and a held
+ * key delivers a stream of clicks that look exactly like fresh keypresses.
+ *
+ * Every sequence below is written in the order a browser fires it, with the
+ * clock advanced by hand, because the only thing being tested is order and
+ * timing. The four regressions named R1-R4 are the DUB-57 review's.
  */
 describe('buyActivation', () => {
-  /** A button mid-render, with its ref box and a spy for the purchase. */
-  function button({ inactive = false } = {}) {
+  /** A clock the test steps, standing in for `performance.now()`. */
+  function stopwatch(): ActivationClock & { advance: (ms: number) => void } {
+    let t = 1_000;
+    return { now: () => t, advance: (ms) => void (t += ms) };
+  }
+
+  /**
+   * A button mid-render, with a spy for the purchase.
+   *
+   * `log` and `clock` are parameters so that two buttons can share them — which
+   * is the whole of R3, and is also what the real component does.
+   */
+  function button({
+    inactive = false,
+    log = createBuyActivationLog(),
+    clock = stopwatch(),
+  } = {}) {
     const onBuy = vi.fn();
     const setPressed = vi.fn();
-    const pointerServed = { current: false };
 
     return {
       onBuy,
       setPressed,
-      pointerServed,
-      handlers: buyActivation({ pointerServed, inactive, onBuy, setPressed }),
+      log,
+      clock,
+      handlers: buyActivation({ log, clock, inactive, onBuy, setPressed }),
     };
   }
 
@@ -274,49 +310,73 @@ describe('buyActivation', () => {
    *
    * `pointerup` and `pointerleave` both land before the compatibility `click` —
    * touch has implicit capture, so the pointer ceases to exist on release and
-   * the leave is fired for it. Which is exactly why the flag that suppresses
-   * the click cannot be cleared by either of them.
+   * the leave is fired for it. Which is why the window that suppresses the
+   * click is refreshed by them rather than cleared.
    */
-  function tap(handlers: ReturnType<typeof buyActivation>, detail = 1): void {
-    handlers.pointerDown();
-    handlers.release();
-    handlers.click({ detail });
+  function tap(
+    b: ReturnType<typeof button>,
+    { detail = 1, holdMs = 80, clickAfterMs = 300 } = {},
+  ): void {
+    b.handlers.pointerDown();
+    b.clock.advance(holdMs);
+    b.handlers.pointerEnd();
+    b.clock.advance(clickAfterMs);
+    b.handlers.click({ detail });
   }
 
   /**
-   * One keypress on a focused button.
-   *
-   * Enter and Space differ in where the browser puts the activation — Enter
-   * synthesises the click from the keydown's default action, Space swallows the
-   * keydown and clicks on the way up — but both reduce to the same two events
-   * reaching this module, in this order, and that is the point: neither of them
-   * is a `pointerdown`, which is why neither of them used to buy anything.
+   * One Enter press. The browser synthesises the `click` from the keydown's
+   * default action, so it arrives between the two key events.
    */
-  function pressKey(handlers: ReturnType<typeof buyActivation>): void {
-    handlers.keyDown();
-    handlers.click({ detail: 0 });
+  function pressEnter(b: ReturnType<typeof button>, { repeats = 0 } = {}): void {
+    b.handlers.keyDown({ key: 'Enter', repeat: false });
+    b.handlers.click({ detail: 0 });
+    for (let i = 0; i < repeats; i += 1) {
+      // ~30 Hz, which is roughly a platform's repeat rate.
+      b.clock.advance(33);
+      b.handlers.keyDown({ key: 'Enter', repeat: true });
+      b.handlers.click({ detail: 0 });
+    }
+    b.handlers.keyUp({ key: 'Enter', repeat: false });
+  }
+
+  /**
+   * One Space press. Space swallows the keydown — that is why it does not
+   * scroll the page — and activates on the way up, so its single `click`
+   * follows the `keyup` however long the key was held.
+   */
+  function pressSpace(b: ReturnType<typeof button>, { repeats = 0 } = {}): void {
+    b.handlers.keyDown({ key: ' ', repeat: false });
+    for (let i = 0; i < repeats; i += 1) {
+      b.clock.advance(33);
+      b.handlers.keyDown({ key: ' ', repeat: true });
+    }
+    b.handlers.keyUp({ key: ' ', repeat: false });
+    b.handlers.click({ detail: 0 });
   }
 
   it('buys once on a tap, on the pointer down and not on the click after it', () => {
-    const { handlers, onBuy } = button();
+    const b = button();
 
-    handlers.pointerDown();
+    b.handlers.pointerDown();
     // The purchase is already made here — before `pointerup`, let alone before
     // the ~300 ms `click`. That is criterion 2's 100 ms budget.
-    expect(onBuy).toHaveBeenCalledTimes(1);
+    expect(b.onBuy).toHaveBeenCalledTimes(1);
 
-    handlers.release();
-    handlers.click({ detail: 1 });
-    expect(onBuy).toHaveBeenCalledTimes(1);
+    b.clock.advance(80);
+    b.handlers.pointerEnd();
+    b.clock.advance(300);
+    b.handlers.click({ detail: 1 });
+    expect(b.onBuy).toHaveBeenCalledTimes(1);
   });
 
   it('buys once on Enter, and once on Space', () => {
     const enter = button();
-    pressKey(enter.handlers);
+    pressEnter(enter);
     expect(enter.onBuy).toHaveBeenCalledTimes(1);
 
     const space = button();
-    pressKey(space.handlers);
+    pressSpace(space);
     expect(space.onBuy).toHaveBeenCalledTimes(1);
   });
 
@@ -324,77 +384,227 @@ describe('buyActivation', () => {
     // The reason `detail` is not the only guard. It is the click count, so a
     // touch-derived click *should* report 1 — but that is an assumption about
     // an engine, and the cost of it being wrong is the player's money. The
-    // `pointerServed` flag does not need the assumption.
-    const { handlers, onBuy } = button();
+    // pointer window does not need the assumption.
+    const b = button();
 
-    tap(handlers, 0);
+    tap(b, { detail: 0 });
+
+    expect(b.onBuy).toHaveBeenCalledTimes(1);
+  });
+
+  it('charges two taps in a row twice, and no more', () => {
+    const b = button();
+
+    tap(b);
+    tap(b);
+
+    expect(b.onBuy).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not double-buy a long press, whose click lands a second after the finger', () => {
+    // The window is refreshed on the way up, not just stamped on the way down.
+    // Held for three seconds, the compatibility click is 3.3 s after the
+    // `pointerdown` — outside any window measured from it.
+    const b = button();
+
+    tap(b, { detail: 0, holdMs: 3_000 });
+
+    expect(b.onBuy).toHaveBeenCalledTimes(1);
+  });
+
+  describe('a held key (R1)', () => {
+    it('buys once on a held Enter, not once per repeat', () => {
+      // R1: Enter re-synthesises its click on every repeat, each one with
+      // `detail: 0` and nothing in front of it to say it is not a fresh press.
+      // At ~30 Hz a leaned-on Enter key walked the player up every tier they
+      // could afford. 20 repeats is about two thirds of a second.
+      const b = button();
+
+      pressEnter(b, { repeats: 20 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('buys once on a held Space, on the way up', () => {
+      // The other half of the same rule, and the reason the repeat flag is
+      // cleared by `keyup` rather than by the next fresh `keydown`: Space's one
+      // genuine click arrives *after* a run of repeats.
+      const b = button();
+
+      pressSpace(b, { repeats: 20 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('still buys on the next press after a held one', () => {
+      const b = button();
+
+      pressEnter(b, { repeats: 5 });
+      pressEnter(b);
+      pressSpace(b, { repeats: 5 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it('is not re-armed by a key that cannot activate a button (R2)', () => {
+    // R2: `keydown` fires for Tab, Shift and the arrows, and clearing the
+    // window on any of them let a stray keypress inside the ~300 ms
+    // compatibility window reopen the double buy. The click here reports
+    // `detail: 0` — the touch engine we do not trust — so the window is the
+    // only thing standing between the player and a second charge.
+    const b = button();
+
+    b.handlers.pointerDown();
+    b.handlers.pointerEnd();
+    for (const key of ['Tab', 'Shift', 'ArrowDown', 'a']) {
+      b.handlers.keyDown({ key, repeat: false });
+      b.handlers.keyUp({ key, repeat: false });
+    }
+    b.clock.advance(300);
+    b.handlers.click({ detail: 0 });
+
+    expect(b.onBuy).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses the compatibility click even when the purchase remounted the button (R3)', () => {
+    // R3: buying `Unlock` in `BarsSheet` tears down the row it was pressed on
+    // and mounts `Upgrade` and `+ Lane` in its place, so the click ~300 ms
+    // later reaches a *different* button with a fresh instance. Suppression
+    // held per-instance is reset exactly when it is needed; a shared log is
+    // not. Note the click is `detail: 0` — on an engine that reports it
+    // honestly `detail` would catch this, and this is the case where it is the
+    // shared log or nothing.
+    const log = createBuyActivationLog();
+    const clock = stopwatch();
+    const onBuy = vi.fn();
+
+    const first = buyActivation({
+      log,
+      clock,
+      inactive: false,
+      onBuy,
+      setPressed: vi.fn(),
+    });
+    first.pointerDown();
+    clock.advance(80);
+    first.pointerEnd();
+
+    // The re-render that the purchase caused: a new button, a new instance.
+    const second = buyActivation({
+      log,
+      clock,
+      inactive: false,
+      onBuy,
+      setPressed: vi.fn(),
+    });
+    clock.advance(300);
+    second.click({ detail: 0 });
 
     expect(onBuy).toHaveBeenCalledTimes(1);
   });
 
-  it('suppresses one click per pointer down, not every click thereafter', () => {
-    const { handlers, onBuy } = button();
+  describe('a pointer activation that never produces a click (R4)', () => {
+    it('stops swallowing synthetic activations once its window is up', () => {
+      // R4: a `pointerdown` taken over by a scroll fires `pointercancel` and
+      // no click at all. A flag set by that gesture stood indefinitely, so the
+      // next activation with no `keydown` in front of it — `element.click()`,
+      // a screen reader going through the accessibility tree — was swallowed.
+      // A first press that does nothing is a miserable thing to debug from
+      // behind a screen reader. The window expires on its own.
+      const b = button();
 
-    tap(handlers);
-    tap(handlers);
+      b.handlers.pointerDown();
+      b.handlers.pointerEnd(); // `pointercancel`: the scroll took the gesture.
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
 
-    expect(onBuy).toHaveBeenCalledTimes(2);
-  });
+      b.clock.advance(POINTER_CLICK_WINDOW_MS);
+      b.handlers.click({ detail: 0 });
 
-  it('lets the keyboard through after a tap that never produced a click', () => {
-    // A tap taken over by a scroll: `pointercancel`, no click, and the flag
-    // left standing. The next `keydown` is what clears it — which is the other
-    // reason `keydown` has a handler at all.
-    const { handlers, onBuy } = button();
+      expect(b.onBuy).toHaveBeenCalledTimes(2);
+    });
 
-    handlers.pointerDown();
-    handlers.release();
-    expect(onBuy).toHaveBeenCalledTimes(1);
+    it('still suppresses a click that arrives inside the window', () => {
+      // The other side of the boundary, so the test above cannot pass by the
+      // window being zero.
+      const b = button();
 
-    pressKey(handlers);
-    expect(onBuy).toHaveBeenCalledTimes(2);
+      b.handlers.pointerDown();
+      b.handlers.pointerEnd();
+      b.clock.advance(POINTER_CLICK_WINDOW_MS - 1);
+      b.handlers.click({ detail: 0 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets the keyboard through immediately, without waiting for the window', () => {
+      // A player who taps a button and then presses it has made two
+      // activations and the second must land. A fresh Enter or Space is never
+      // the tail of a tap, so it clears the window outright.
+      const b = button();
+
+      b.handlers.pointerDown();
+      b.handlers.pointerEnd();
+      pressEnter(b);
+
+      expect(b.onBuy).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('ignores a click no pointer and no key produced, unless it is synthetic', () => {
-    const { handlers, onBuy } = button();
+    const b = button();
 
     // A stray mouse click with no `pointerdown` of ours behind it: not ours.
-    handlers.click({ detail: 1 });
-    expect(onBuy).not.toHaveBeenCalled();
+    // This is also the accepted residual in `buyActivation.ts` — voice control
+    // and some switch-access software dispatch a real `MouseEvent`, and this
+    // button will not answer it.
+    b.handlers.click({ detail: 1 });
+    expect(b.onBuy).not.toHaveBeenCalled();
 
     // `element.click()`, and an assistive technology's activation: detail 0,
     // no pointer sequence. That is a real activation and it buys.
-    handlers.click({ detail: 0 });
-    expect(onBuy).toHaveBeenCalledTimes(1);
+    b.handlers.click({ detail: 0 });
+    expect(b.onBuy).toHaveBeenCalledTimes(1);
   });
 
-  it('never buys on `keydown` itself, so a held Space does not buy per repeat', () => {
-    const { handlers, onBuy } = button();
+  it('never buys on a key event itself, whichever key and however many', () => {
+    const b = button();
 
-    handlers.keyDown();
-    handlers.keyDown();
-    handlers.keyDown();
+    for (const key of ['Enter', ' ', 'Tab']) {
+      b.handlers.keyDown({ key, repeat: false });
+      b.handlers.keyDown({ key, repeat: true });
+      b.handlers.keyUp({ key, repeat: false });
+    }
 
-    expect(onBuy).not.toHaveBeenCalled();
+    expect(b.onBuy).not.toHaveBeenCalled();
   });
 
   describe('a button whose press buys nothing — unaffordable, maxed, switched off', () => {
     it('answers the press and withholds the purchase, on both routes alike', () => {
       const tapped = button({ inactive: true });
-      tap(tapped.handlers);
+      tap(tapped);
 
       expect(tapped.onBuy).not.toHaveBeenCalled();
       // The press treatment is the whole of DUB-38's answer to a dead-end tap.
       expect(tapped.setPressed).toHaveBeenCalledWith(true);
 
+      // And criterion 4: the keyboard gets the same treatment, from the same
+      // class and not from `:active`. A held Space is reliably `:active`, but
+      // Enter's is the browser's own business — so on the button where the
+      // press treatment is the only answer there is, CSS alone could have left
+      // an Enter press with nothing at all to show.
       const keyed = button({ inactive: true });
-      pressKey(keyed.handlers);
+      pressEnter(keyed);
 
       expect(keyed.onBuy).not.toHaveBeenCalled();
-      // No `setPressed` on the keyboard route and none wanted: `:active` holds
-      // the same treatment for the length of the keypress, which is longer than
-      // a class set on `click` could last. See `buyActivation.ts`.
-      expect(keyed.setPressed).not.toHaveBeenCalled();
+      expect(keyed.setPressed).toHaveBeenCalledWith(true);
+      expect(keyed.setPressed).toHaveBeenLastCalledWith(false);
+
+      const spaced = button({ inactive: true });
+      pressSpace(spaced);
+
+      expect(spaced.onBuy).not.toHaveBeenCalled();
+      expect(spaced.setPressed).toHaveBeenCalledWith(true);
     });
 
     it('does not let the dead-end tap bank a purchase for the click to make', () => {
@@ -402,12 +612,16 @@ describe('buyActivation', () => {
       // the click arrives — a price that just dropped, or a tick of income
       // between the two events. The click must not transact: the player pressed
       // a button that could not be bought, and nothing has been pressed since.
+      const log = createBuyActivationLog();
+      const clock = stopwatch();
       const onBuy = vi.fn();
-      const pointerServed = { current: false };
 
-      buyActivation({ pointerServed, inactive: true, onBuy, setPressed: vi.fn() }).pointerDown();
-      // The re-render. Same ref box, same element, `inactive` now false.
-      buyActivation({ pointerServed, inactive: false, onBuy, setPressed: vi.fn() }).click({ detail: 0 });
+      buyActivation({ log, clock, inactive: true, onBuy, setPressed: vi.fn() }).pointerDown();
+      clock.advance(380);
+      // The re-render. Same log, same element, `inactive` now false.
+      buyActivation({ log, clock, inactive: false, onBuy, setPressed: vi.fn() }).click({
+        detail: 0,
+      });
 
       expect(onBuy).not.toHaveBeenCalled();
     });
