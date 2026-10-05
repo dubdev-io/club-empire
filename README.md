@@ -32,7 +32,7 @@ npm run dev
 # 3. Build — static production output into dist/
 npm run build
 
-# ...and to check the built output locally — http://localhost:4173
+# ...and to check the built output locally — http://localhost:4173/club-empire/
 npm run preview
 ```
 
@@ -63,13 +63,31 @@ the shipping game shows up as two different sets of numbers rather than as two
 tools that both pass.
 
 `measure:boot` is the DUB-21 regression instrument: it drives a cold load at a
-range of CPU throttles and reports, per frame, whether `.boot__progress` was in
-the DOM **and** not fully transparent while the boot screen was up past the 1 s
-threshold. It wants a `preview` server rather than `dev` (`CLUB_URL` points it
-anywhere), because the thing it measures is bundle-parse and texture-generation
-timing. Rate alone does not decide the outcome — whether the boot screen mounted
-before or after the threshold does — so run a few repeats:
+range of CPU throttles and reports how many **milliseconds** the boot screen was
+up past the 1 s threshold without `.boot__progress` in the DOM. Milliseconds and
+not frames: a blocked main thread fires no `requestAnimationFrame`, so a frame
+count over a slow boot window is a count of nothing and passes whatever is on
+screen.
+
+It wants the `preview` server rather than `dev`, because the thing it measures is
+bundle-parse and texture-generation timing, and `preview` serves the build under
+the Pages base path — so `CLUB_URL` needs that path on it:
+
+```bash
+npm run build && npm run preview &
+google-chrome --headless=new --remote-debugging-port=9222 --no-sandbox \
+  --enable-unsafe-swiftshader about:blank &
+CLUB_URL=http://127.0.0.1:4173/club-empire npm run measure:boot -- 1 6 10 20
+```
+
+Rate alone does not decide the outcome — whether the boot screen mounted before
+or after the threshold does — so run a few repeats:
 `CLUB_BOOT_REPEATS=3 npm run measure:boot -- 10`.
+
+It exits `1` on a load that was owed a bar and did not have one, and `3` when it
+measured nothing at all: no load still booting at the threshold, or no boot
+screen on the page. An instrument with no opinion must not report a pass, which
+is the false green both earlier versions of this tool managed to produce.
 
 `shots` and `measure:frames` need a dev server and a headless Chrome with remote
 debugging:
@@ -84,9 +102,10 @@ The production build is static files in `dist/`. There is no backend, no
 server and no database.
 
 **`npm run build` sets Vite's `base` to `/club-empire/`**, the GitHub Pages
-project subpath — without it every asset 404s under that path. The dev server
-is unaffected and still serves from `/`. `CLUB_EMPIRE_BASE` overrides both, for
-a host that serves from the root:
+project subpath — without it every asset 404s under that path. `npm run preview`
+uses the same base, because it serves that build output and has to answer on the
+paths baked into it. The dev server is unaffected and still serves from `/`.
+`CLUB_EMPIRE_BASE` overrides all of them, for a host that serves from the root:
 
 ```bash
 CLUB_EMPIRE_BASE=/ npm run build
