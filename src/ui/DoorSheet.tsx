@@ -90,7 +90,7 @@ export function DoorSheet(): React.JSX.Element {
         label={doorMaxed ? `Door Lv ${DOOR_MAX}` : `Upgrade to Door Lv ${doorLevel + 1}`}
         price={formatCash(doorCost ?? 0)}
         affordable={doorCost !== null && cash >= doorCost}
-        doneLabel={doorMaxed ? 'MAXED' : undefined}
+        doneLabel={doorMaxed ? 'Maxed' : undefined}
         accent="cyan"
         onBuy={actions.upgradeDoor}
       />

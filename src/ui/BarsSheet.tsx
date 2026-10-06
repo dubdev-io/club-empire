@@ -141,8 +141,10 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
             me". `Lv 30` / `MAXED` keeps the mapping, states the level once, and
             states the terminal word once.
 
-            `MAXED` is also what the badge was always called — in this file, in
-            `.cta--maxed`, and in `tools/contrast.ts`. It now says so.
+            MAXED is also what the badge was always called — in this file, in
+            `.cta--maxed`, and in `tools/contrast.ts`. It now says so. The copy
+            here is sentence-case and `.cta__done` does the uppercasing, which
+            is how `.door-compare__label` and `.card__title` already work.
 
             The badge deliberately carries no stars. The header two rows up
             already shows ★★★ and the level, and design review asked for one of
@@ -153,7 +155,7 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
           }
           price={formatCash(station.upgradeCost ?? 0)}
           affordable={station.upgradeCost !== null && cash >= station.upgradeCost}
-          doneLabel={station.maxed ? 'MAXED' : undefined}
+          doneLabel={station.maxed ? 'Maxed' : undefined}
           onBuy={() => actions.upgradeStation(station.key)}
         />
         {/* The lane count is the one number here that lives nowhere else on the
@@ -168,7 +170,7 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
           }
           price={formatCash(station.laneCost ?? 0)}
           affordable={station.laneCost !== null && cash >= station.laneCost}
-          doneLabel={station.laneCost === null ? 'MAXED' : undefined}
+          doneLabel={station.laneCost === null ? 'Maxed' : undefined}
           accent="cyan"
           onBuy={() => actions.buyLane(station.key)}
         />

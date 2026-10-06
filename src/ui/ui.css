@@ -768,9 +768,15 @@
   font-size: var(--text-xs);
 }
 
+/* The badge in the slot that held the price on a finished row (DUB-55). The
+   0.08em was always caps tracking waiting for a caps word — it tracked
+   `Lv 30 of 30` before, which did not need it. The transform lives here rather
+   than in the copy, matching `.door-compare__label` and `.card__title`: the
+   JSX says `Maxed`, so a screen reader never gets the chance to spell it. */
 .cta__done {
   font-size: var(--text-sm);
   letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--gold-vip);
 }
 
