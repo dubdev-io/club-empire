@@ -52,6 +52,7 @@ npm run sim:autobuy      # the SHIPPING game against the same table
 node tools/autobuy.ts --tap   # ...with a player collecting every bubble
 
 npm run shots            # all ten states at 390x844 and 1440x900
+npm run audit:focus      # every tab stop in the three sheets, measured (DUB-50/-72)
 npm run measure:frames   # per-system frame time at the §11 entity ceiling
 ```
 
@@ -61,8 +62,21 @@ the real purchase functions — so a divergence between the signed-off model and
 the shipping game shows up as two different sets of numbers rather than as two
 tools that both pass.
 
-`shots` and `measure:frames` need a dev server and a headless Chrome with remote
-debugging:
+`audit:focus` walks the real tab ring at 1440x900 and reads the ring the browser
+actually drew off `document.activeElement` — `outline-width`, and how much room
+it has inside every clipping ancestor. It fails on a stop with no ring, a clipped
+one, or a stop that is *outside the open dialog* — which is the half of the focus
+work a source-reading test cannot reach: `vitest` runs on node, where there is no
+layout, no `:focus-visible` and no focus engine to trap.
+
+That third failure is DUB-72. Each sheet used to put its three bottom-bar buttons
+in the tab ring ahead of its own controls, behind `.overlay__scrim`, where the
+ring composites to 2.27:1 and fails WCAG 1.4.11 — and `aria-modal="true"` was a
+false claim to every AT that trusts it. `src/ui/focusTrap.ts` is the trap, and
+`audit:focus` went from 9 such stops to 0.
+
+`shots`, `audit:focus` and `measure:frames` need a dev server and a headless
+Chrome with remote debugging:
 
 ```bash
 npm run dev &

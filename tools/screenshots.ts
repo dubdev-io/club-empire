@@ -157,6 +157,10 @@ async function key(cdp: Cdp, name: keyof typeof KEYS, type: 'keyDown' | 'keyUp')
  * Walking the real tab ring and checking where it landed is both robust and the
  * verification the ticket asks for: if the ring never reaches the control, this
  * throws instead of producing a screenshot nobody looks twice at.
+ *
+ * On arrival the ring is measured, and a focus shot whose ring is missing or
+ * clipped fails the run rather than being saved. The shot is the evidence, so it
+ * must not be able to quietly photograph the thing the ticket says is fixed.
  */
 async function tabTo(cdp: Cdp, predicate: string, limit = 40): Promise<void> {
   for (let press = 0; press < limit; press += 1) {
@@ -166,12 +170,164 @@ async function tabTo(cdp: Cdp, predicate: string, limit = 40): Promise<void> {
     const arrived = await cdp.evaluate<boolean>(
       `const el = document.activeElement; return Boolean(el) && Boolean(${predicate});`,
     );
-    if (arrived) return;
+    if (!arrived) continue;
+
+    const stop = await measureFocus(cdp);
+    if (stop === null) throw new Error(`focus vanished on arriving at ${predicate}`);
+    if (stop.ring === 0) {
+      throw new Error(`no focus ring on ${stop.label}: :focus-visible did not match`);
+    }
+    if (stop.clearance < 0) {
+      throw new Error(
+        `focus ring on ${stop.label} is clipped by ${stop.clippedBy} ` +
+          `(${stop.clearance}px, gap ${stop.gap}px)`,
+      );
+    }
+    return;
   }
   throw new Error(`Tab never reached an element matching ${predicate} in ${limit} presses`);
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---------------------------------------------------------------------------
+// The focus ring, measured (DUB-50)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the browser actually drew around `document.activeElement`, and whether
+ * anything is cutting it off.
+ *
+ * Two numbers that are easy to confuse, so both are reported:
+ *
+ *  - **`gap`** — px between the control's own edge and the nearest clipping
+ *    edge, before the ring is considered at all. This is the number quoted in
+ *    the ticket and in `ui.css`: `.sheet__body` had `padding: 0 var(--gutter)`,
+ *    so the first and last control in every sheet measured a gap of 0.0.
+ *  - **`clearance`** — the same thing after inflating the control's rect by the
+ *    ring's reach (`outline-width` + `outline-offset`, read off the element, not
+ *    off the tokens). This is the WCAG 2.4.11 answer: negative means some of the
+ *    ring is being clipped away. 0.0 is legal — the ring ends exactly on the
+ *    clipping edge.
+ *
+ * `ring` is read from the computed style rather than assumed, which makes this
+ * the only check in the repo that can fail because `:focus-visible` did *not*
+ * match: `focusRing.test.ts` reads the stylesheet as text and node has no CSSOM,
+ * so "the rule exists" is all it can ever prove. Here a stop with `ring: 0` is
+ * a stop with no ring, whatever the stylesheet says.
+ *
+ * Clipping is measured at the **padding box** of every ancestor whose overflow
+ * clips (`auto`, `scroll`, `hidden`, `clip`), plus the viewport, which clips
+ * everything. Overlap by a *sibling* is not measured — that is the other half
+ * of 2.4.11 and it needs the pixels, i.e. QA and the shots.
+ */
+interface FocusStop {
+  readonly label: string;
+  /** `outline-width`, in px. `0` means nothing was drawn. */
+  readonly ring: number;
+  readonly offset: number;
+  readonly gap: number;
+  readonly clearance: number;
+  readonly clippedBy: string;
+  /**
+   * A dialog is open and this stop is outside it, i.e. behind `.overlay__scrim`.
+   * A failure since DUB-72 put the focus trap in — nothing should be reachable
+   * out there, and the ring composites at ~2.3:1 if it is.
+   */
+  readonly behindScrim: boolean;
+  /** Index of the earlier stop this one repeats, if the ring has come round. */
+  readonly seen: number | null;
+}
+
+const MEASURE_FOCUS = `
+  const el = document.activeElement;
+  if (!el || el === document.body || el === document.documentElement) return null;
+
+  const describe = (node) => {
+    const classes = node.classList.length ? '.' + [...node.classList].join('.') : '';
+    const text = (node.textContent ?? '').replace(/\\s+/g, ' ').trim().slice(0, 24);
+    return node.tagName.toLowerCase() + classes + (text ? ' \\u201c' + text + '\\u201d' : '');
+  };
+
+  const style = getComputedStyle(el);
+  const ring = style.outlineStyle === 'none' ? 0 : parseFloat(style.outlineWidth) || 0;
+  const offset = parseFloat(style.outlineOffset) || 0;
+  const reach = ring > 0 ? ring + Math.max(offset, 0) : 0;
+
+  const rect = el.getBoundingClientRect();
+  const room = (clip, grow) => Math.min(
+    rect.top - grow - clip.top,
+    clip.bottom - (rect.bottom + grow),
+    rect.left - grow - clip.left,
+    clip.right - (rect.right + grow),
+  );
+
+  // Every clipping ancestor, at its padding box, plus the viewport.
+  const clips = [[{ top: 0, left: 0, bottom: innerHeight, right: innerWidth }, 'viewport']];
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    const cs = getComputedStyle(node);
+    if (!/auto|scroll|hidden|clip/.test(cs.overflowX + ' ' + cs.overflowY)) continue;
+    const r = node.getBoundingClientRect();
+    clips.push([{
+      top: r.top + parseFloat(cs.borderTopWidth),
+      bottom: r.bottom - parseFloat(cs.borderBottomWidth),
+      left: r.left + parseFloat(cs.borderLeftWidth),
+      right: r.right - parseFloat(cs.borderRightWidth),
+    }, describe(node)]);
+  }
+
+  let gap = Infinity;
+  let clearance = Infinity;
+  let clippedBy = 'viewport';
+  for (const [clip, label] of clips) {
+    gap = Math.min(gap, room(clip, 0));
+    const after = room(clip, reach);
+    if (after < clearance) { clearance = after; clippedBy = label; }
+  }
+
+  // Marked rather than matched by label: three bar buttons read alike, and the
+  // walk has to know when the ring has come round rather than guess.
+  const seen = el.dataset.focusAudit === undefined ? null : Number(el.dataset.focusAudit);
+
+  // The *last* dialog in the document, not the first. \`ClubComplete\` can open
+  // over an already-open sheet — it is raised by buying the last upgrade in
+  // \`BarsSheet\` — and \`App\` renders the cards after the sheets, so last in
+  // document order is the one on top and the one focus is trapped in. Taking
+  // the first would call every stop in the card "behind the scrim".
+  const dialogs = document.querySelectorAll('[role="dialog"]');
+  const dialog = dialogs[dialogs.length - 1] ?? null;
+  const round = (n) => Math.round(n * 10) / 10;
+  return {
+    label: describe(el),
+    ring, offset,
+    gap: round(gap),
+    clearance: round(clearance),
+    clippedBy,
+    behindScrim: Boolean(dialog) && !dialog.contains(el),
+    seen,
+  };
+`;
+
+/** Measure wherever focus currently is. `null` when focus has left the page. */
+async function measureFocus(cdp: Cdp): Promise<FocusStop | null> {
+  return cdp.evaluate<FocusStop | null>(MEASURE_FOCUS);
+}
+
+/**
+ * Tab once, measure, and claim the element so the walk can tell a cycle from a
+ * coincidence.
+ */
+async function stepFocus(cdp: Cdp, index: number): Promise<FocusStop | null> {
+  await key(cdp, 'Tab', 'keyDown');
+  await key(cdp, 'Tab', 'keyUp');
+  await sleep(40);
+
+  const stop = await measureFocus(cdp);
+  if (stop !== null && stop.seen === null) {
+    await cdp.evaluate(`document.activeElement.dataset.focusAudit = '${index}'; return true;`);
+  }
+  return stop;
+}
 
 // ---------------------------------------------------------------------------
 // The states
@@ -614,6 +770,144 @@ const SHOTS: readonly Shot[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// The focus audit (DUB-50)
+// ---------------------------------------------------------------------------
+
+/**
+ * The three screens the ticket asks to be tabbed through, at 1440x900.
+ *
+ * Shots 23/24 photograph one button on one sheet; this walks every stop on all
+ * three and measures each one. Separate from `SHOTS` because it produces no
+ * PNGs — a table of numbers is the deliverable, and it is the thing that lets
+ * anyone re-derive the clearance figures quoted in `ui.css` rather than taking
+ * the commit message's word for them.
+ */
+const FOCUS_WALKS = [
+  { name: 'bars', drive: `window.__clubStore.getState().openSheet('bars');` },
+  { name: 'door', drive: `window.__clubStore.getState().openSheet('door');` },
+  { name: 'settings', drive: `window.__clubStore.getState().openSheet('settings');` },
+] as const;
+
+/** Tab all the way round once, measuring every stop. */
+async function walkFocusRing(cdp: Cdp, limit = 40): Promise<readonly FocusStop[]> {
+  await cdp.evaluate(`
+    for (const node of document.querySelectorAll('[data-focus-audit]')) delete node.dataset.focusAudit;
+    document.activeElement?.blur();
+    return true;
+  `);
+
+  const stops: FocusStop[] = [];
+  for (let press = 0; press < limit; press += 1) {
+    const stop = await stepFocus(cdp, stops.length);
+    // Focus left the document — Tab walked off the end into the browser's own
+    // UI. That is the end of the ring, not a failure.
+    if (stop === null) break;
+    if (stop.seen !== null) break;
+    stops.push(stop);
+  }
+  return stops;
+}
+
+/**
+ * `npm run audit:focus` — every tab stop in the three sheets, measured.
+ *
+ * Fails the run on three things: a stop with no ring (`:focus-visible` did not
+ * match), a clipped one (WCAG 2.4.11), and a stop outside the open dialog
+ * (WCAG 1.4.11, and `aria-modal` lying).
+ *
+ * The third one used to be reported and counted but not failed, because it was
+ * not fixable in the ring's geometry — the nine stops were the bottom bar, left
+ * in the tab ring by three dialogs with no focus trap, drawing at 2.27:1 under
+ * `.overlay__scrim`. DUB-72 added the trap (`src/ui/focusTrap.ts`) and the count
+ * is now 0, so the correct number is an assertion rather than a note. A trap is
+ * the kind of thing that comes off in a refactor without anything looking
+ * broken: this is what notices.
+ */
+async function auditFocus(): Promise<void> {
+  const desktop = VIEWPORTS.find((v) => v.name === 'desktop')!;
+
+  const cdp = await Cdp.connect(await pageTarget());
+  await cdp.send('Page.enable');
+  await cdp.send('Runtime.enable');
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: desktop.width,
+    height: desktop.height,
+    deviceScaleFactor: desktop.scale,
+    mobile: desktop.mobile,
+  });
+
+  const failures: string[] = [];
+  let obscured = 0;
+
+  console.log(`focus audit at ${desktop.width}x${desktop.height}\n`);
+
+  for (const walk of FOCUS_WALKS) {
+    await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
+    await sleep(400);
+    await cdp.evaluate(`${FRESH} return true;`);
+    await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await sleep(100);
+      const ready = await cdp
+        .evaluate<boolean>(`return Boolean(window.__clubStore) && Boolean(window.__club);`)
+        .catch(() => false);
+      if (ready) break;
+    }
+
+    await cdp.evaluate(`
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      ${walk.drive}
+      return true;
+    `);
+    await sleep(500);
+
+    const stops = await walkFocusRing(cdp);
+    console.log(`=== ${walk.name} === ${stops.length} stops`);
+    if (stops.length === 0) failures.push(`${walk.name}: Tab reached nothing at all`);
+
+    for (const stop of stops) {
+      const ring = stop.ring === 0 ? 'NO RING' : `${stop.ring}+${stop.offset}px`;
+      const note = stop.behindScrim ? '  BEHIND THE SCRIM' : '';
+      console.log(
+        `  ${ring.padEnd(9)} gap ${String(stop.gap).padStart(6)}  ` +
+          `clearance ${String(stop.clearance).padStart(6)}  ` +
+          `vs ${stop.clippedBy.padEnd(34)} ${stop.label}${note}`,
+      );
+
+      if (stop.ring === 0) failures.push(`${walk.name}: no ring on ${stop.label}`);
+      if (stop.clearance < 0) {
+        failures.push(
+          `${walk.name}: ${stop.label} clipped by ${stop.clippedBy} (${stop.clearance}px)`,
+        );
+      }
+      if (stop.behindScrim) {
+        obscured += 1;
+        failures.push(
+          `${walk.name}: ${stop.label} is outside the open dialog — the ring composites ` +
+            `under .overlay__scrim at ~2.3:1 (WCAG 1.4.11) and aria-modal is false. ` +
+            `The focus trap is src/ui/focusTrap.ts (DUB-72).`,
+        );
+      }
+    }
+    console.log('');
+  }
+
+  cdp.close();
+
+  if (failures.length > 0) {
+    console.error(`focus audit FAILED\n${failures.map((f) => `  - ${f}`).join('\n')}`);
+    process.exit(1);
+  }
+  console.log(
+    `focus audit passed: every stop draws a ring, none of them is clipped, and ${obscured} ` +
+      `of them is outside its dialog.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
@@ -635,7 +929,7 @@ async function pageTarget(): Promise<string> {
  * unchanged.
  */
 function selectedShots(): readonly Shot[] {
-  const filters = process.argv.slice(2);
+  const filters = process.argv.slice(2).filter((arg) => !arg.startsWith('--'));
   if (filters.length === 0) return SHOTS;
 
   const chosen = SHOTS.filter((shot) => filters.some((f) => shot.name.includes(f)));
@@ -644,6 +938,15 @@ function selectedShots(): readonly Shot[] {
 }
 
 async function main(): Promise<void> {
+  // `--focus-audit` borrows the harness and captures nothing: same CDP client,
+  // same page, same focus emulation, but the output is a table of measurements
+  // rather than PNGs. Checked before `mkdir` so an audit run leaves no
+  // `screenshots/` behind.
+  if (process.argv.includes('--focus-audit')) {
+    await auditFocus();
+    return;
+  }
+
   await mkdir(OUT_DIR, { recursive: true });
   const shots = selectedShots();
 
