@@ -229,7 +229,11 @@ interface FocusStop {
   readonly gap: number;
   readonly clearance: number;
   readonly clippedBy: string;
-  /** A dialog is open and this stop is outside it — see DUB-72. */
+  /**
+   * A dialog is open and this stop is outside it, i.e. behind `.overlay__scrim`.
+   * A failure since DUB-72 put the focus trap in — nothing should be reachable
+   * out there, and the ring composites at ~2.3:1 if it is.
+   */
   readonly behindScrim: boolean;
   /** Index of the earlier stop this one repeats, if the ring has come round. */
   readonly seen: number | null;
@@ -285,7 +289,13 @@ const MEASURE_FOCUS = `
   // walk has to know when the ring has come round rather than guess.
   const seen = el.dataset.focusAudit === undefined ? null : Number(el.dataset.focusAudit);
 
-  const dialog = document.querySelector('[role="dialog"]');
+  // The *last* dialog in the document, not the first. \`ClubComplete\` can open
+  // over an already-open sheet — it is raised by buying the last upgrade in
+  // \`BarsSheet\` — and \`App\` renders the cards after the sheets, so last in
+  // document order is the one on top and the one focus is trapped in. Taking
+  // the first would call every stop in the card "behind the scrim".
+  const dialogs = document.querySelectorAll('[role="dialog"]');
+  const dialog = dialogs[dialogs.length - 1] ?? null;
   const round = (n) => Math.round(n * 10) / 10;
   return {
     label: describe(el),
@@ -801,12 +811,17 @@ async function walkFocusRing(cdp: Cdp, limit = 40): Promise<readonly FocusStop[]
 /**
  * `npm run audit:focus` — every tab stop in the three sheets, measured.
  *
- * Fails the run on a stop with no ring (`:focus-visible` did not match) or a
- * clipped one (WCAG 2.4.11). Does *not* fail on a stop behind the scrim: those
- * are the bar buttons left in the tab ring by a dialog with no focus trap, they
- * are a real 1.4.11 failure, and they are DUB-72's to fix rather than something
- * the ring's own geometry can do anything about. Reported, counted, and called
- * by name so the gap cannot quietly become permanent.
+ * Fails the run on three things: a stop with no ring (`:focus-visible` did not
+ * match), a clipped one (WCAG 2.4.11), and a stop outside the open dialog
+ * (WCAG 1.4.11, and `aria-modal` lying).
+ *
+ * The third one used to be reported and counted but not failed, because it was
+ * not fixable in the ring's geometry — the nine stops were the bottom bar, left
+ * in the tab ring by three dialogs with no focus trap, drawing at 2.27:1 under
+ * `.overlay__scrim`. DUB-72 added the trap (`src/ui/focusTrap.ts`) and the count
+ * is now 0, so the correct number is an assertion rather than a note. A trap is
+ * the kind of thing that comes off in a refactor without anything looking
+ * broken: this is what notices.
  */
 async function auditFocus(): Promise<void> {
   const desktop = VIEWPORTS.find((v) => v.name === 'desktop')!;
@@ -855,7 +870,7 @@ async function auditFocus(): Promise<void> {
 
     for (const stop of stops) {
       const ring = stop.ring === 0 ? 'NO RING' : `${stop.ring}+${stop.offset}px`;
-      const note = stop.behindScrim ? '  behind the scrim (DUB-72)' : '';
+      const note = stop.behindScrim ? '  BEHIND THE SCRIM' : '';
       console.log(
         `  ${ring.padEnd(9)} gap ${String(stop.gap).padStart(6)}  ` +
           `clearance ${String(stop.clearance).padStart(6)}  ` +
@@ -868,25 +883,28 @@ async function auditFocus(): Promise<void> {
           `${walk.name}: ${stop.label} clipped by ${stop.clippedBy} (${stop.clearance}px)`,
         );
       }
-      if (stop.behindScrim) obscured += 1;
+      if (stop.behindScrim) {
+        obscured += 1;
+        failures.push(
+          `${walk.name}: ${stop.label} is outside the open dialog — the ring composites ` +
+            `under .overlay__scrim at ~2.3:1 (WCAG 1.4.11) and aria-modal is false. ` +
+            `The focus trap is src/ui/focusTrap.ts (DUB-72).`,
+        );
+      }
     }
     console.log('');
   }
 
   cdp.close();
 
-  if (obscured > 0) {
-    console.log(
-      `${obscured} stop(s) sit behind the sheet scrim, where the ring composites to ~2.3:1 ` +
-        `and fails WCAG 1.4.11. Not fixable in the ring — see DUB-72.\n`,
-    );
-  }
-
   if (failures.length > 0) {
     console.error(`focus audit FAILED\n${failures.map((f) => `  - ${f}`).join('\n')}`);
     process.exit(1);
   }
-  console.log('focus audit passed: every stop draws a ring, and none of them is clipped.');
+  console.log(
+    `focus audit passed: every stop draws a ring, none of them is clipped, and ${obscured} ` +
+      `of them is outside its dialog.`,
+  );
 }
 
 // ---------------------------------------------------------------------------

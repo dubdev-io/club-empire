@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { ctaClassName } from './ctaClass.ts';
+import { useFocusTrap } from './focusTrap.ts';
 
 /**
  * The bottom sheet every panel in the game uses.
@@ -10,6 +11,11 @@ import { ctaClassName } from './ctaClass.ts';
  * button in the top-right. Tapping the scrim closes it, and so does `Escape` —
  * that part lives in `App` because it is one listener for the whole overlay
  * stack rather than one per sheet.
+ *
+ * `aria-modal="true"` below is a claim about the keyboard, and `useFocusTrap` is
+ * what makes it one the sheet can keep: without it the three bottom-bar buttons
+ * stayed in the tab ring behind the scrim, where the focus ring composites to
+ * 2.27:1 (DUB-72).
  *
  * The drag handle is a signifier, not a control: §9 fixes Phase 1 to tap only,
  * no drag. It is there because a sheet without one does not read as
@@ -25,6 +31,8 @@ export interface SheetProps {
 }
 
 export function Sheet({ title, subtitle, onClose, children }: SheetProps): React.JSX.Element {
+  const sheet = useFocusTrap<HTMLDivElement>();
+
   return (
     <div className="overlay" role="presentation">
       {/*
@@ -34,7 +42,10 @@ export function Sheet({ title, subtitle, onClose, children }: SheetProps): React
       */}
       <div className="overlay__scrim" onPointerDown={onClose} aria-hidden="true" />
 
-      <div className="sheet" role="dialog" aria-modal="true" aria-label={title}>
+      {/* `tabIndex={-1}` is the trap's landing place, not a tab stop: focus
+          arrives on the panel so the sheet and its label are announced before
+          its first control. See `focusTrap.ts`. */}
+      <div className="sheet" role="dialog" aria-modal="true" aria-label={title} ref={sheet} tabIndex={-1}>
         <div className="sheet__handle" aria-hidden="true" />
 
         <header className="sheet__header">
