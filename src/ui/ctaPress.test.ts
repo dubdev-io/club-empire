@@ -48,7 +48,13 @@ function block(selector: string): string {
 
 describe('ctaClassName', () => {
   it('always puts the bare `cta` class first, so the press rule can be (0,2,0)', () => {
-    const classes = ctaClassName({ accent: 'cyan', affordable: true, inactive: false, pressed: true });
+    const classes = ctaClassName({
+      accent: 'cyan',
+      affordable: true,
+      inactive: false,
+      maxed: false,
+      pressed: true,
+    });
 
     expect(classes.split(' ')[0]).toBe('cta');
     // `.cta.cta--pressed` is the selector ui.css relies on. If `cta` were ever
@@ -58,26 +64,87 @@ describe('ctaClassName', () => {
   });
 
   it('fills a button whose tap buys something', () => {
-    expect(ctaClassName({ accent: 'magenta', affordable: true, inactive: false, pressed: false })).toBe(
-      'cta cta--magenta cta--affordable',
-    );
+    expect(
+      ctaClassName({ accent: 'magenta', affordable: true, inactive: false, maxed: false, pressed: false }),
+    ).toBe('cta cta--magenta cta--affordable');
   });
 
   it('withholds the fill when the tap buys nothing — unaffordable, maxed, or switched off', () => {
-    const unaffordable = ctaClassName({ accent: 'cyan', affordable: false, inactive: false, pressed: false });
-    const maxed = ctaClassName({ accent: 'cyan', affordable: true, inactive: true, pressed: false });
+    const unaffordable = ctaClassName({
+      accent: 'cyan',
+      affordable: false,
+      inactive: false,
+      maxed: false,
+      pressed: false,
+    });
+    const maxed = ctaClassName({
+      accent: 'cyan',
+      affordable: true,
+      inactive: true,
+      maxed: true,
+      pressed: false,
+    });
+    const switchedOff = ctaClassName({
+      accent: 'cyan',
+      affordable: true,
+      inactive: true,
+      maxed: false,
+      pressed: false,
+    });
 
     expect(unaffordable).not.toContain('cta--affordable');
     expect(maxed).not.toContain('cta--affordable');
+    expect(switchedOff).not.toContain('cta--affordable');
   });
 
   it('marks the press on a dead-end button too — that is the tap that had no answer', () => {
-    expect(ctaClassName({ accent: 'cyan', affordable: false, inactive: false, pressed: true })).toBe(
-      'cta cta--cyan cta--pressed',
-    );
-    expect(ctaClassName({ accent: 'magenta', affordable: true, inactive: true, pressed: true })).toBe(
-      'cta cta--magenta cta--pressed',
-    );
+    expect(
+      ctaClassName({ accent: 'cyan', affordable: false, inactive: false, maxed: false, pressed: true }),
+    ).toBe('cta cta--cyan cta--pressed');
+    expect(
+      ctaClassName({ accent: 'magenta', affordable: true, inactive: true, maxed: false, pressed: true }),
+    ).toBe('cta cta--magenta cta--pressed');
+  });
+
+  /*
+   * DUB-42's guarantee, re-pinned here after the DUB-38 rebase.
+   *
+   * DUB-42 wrote `cta--maxed` as a literal in `Sheet.tsx` and asserted that
+   * literal from `ctaContrast.test.ts`; DUB-38 moved class composition into
+   * `ctaClassName`, so the literal no longer exists and the assertion had to
+   * move with it. These are the tests that make the merge-time trap fail loudly:
+   * dropping `maxed` to make the two sides fit puts the `aria-disabled` dim back
+   * on the button, and the gold MAXED badge composites at 4.37:1 instead of
+   * 11.68:1 — under AA, which is the whole of DUB-42.
+   */
+  it('puts cta--maxed on a maxed row, so the dim moves to the label and the badge clears AA (DUB-42)', () => {
+    expect(
+      ctaClassName({ accent: 'magenta', affordable: false, inactive: true, maxed: true, pressed: false }),
+    ).toBe('cta cta--magenta cta--maxed');
+  });
+
+  it('withholds cta--maxed from a button that is merely switched off — only a badge row gets it', () => {
+    // Narrower than `inactive` on purpose: `inactive` is `disabled || isDone`,
+    // and a `disabled` row still shows a price, not a `--gold-vip` badge, so it
+    // has no child that needs the dim moved off it.
+    expect(
+      ctaClassName({ accent: 'cyan', affordable: true, inactive: true, maxed: false, pressed: false }),
+    ).not.toContain('cta--maxed');
+  });
+
+  it('keeps the press alongside the maxed treatment rather than replacing it', () => {
+    // A maxed button still answers a tap (DUB-38) while still reading as inert
+    // (DUB-42). Both classes have to survive on the same element.
+    const classes = ctaClassName({
+      accent: 'magenta',
+      affordable: false,
+      inactive: true,
+      maxed: true,
+      pressed: true,
+    });
+
+    expect(classes).toContain('cta--maxed');
+    expect(classes).toContain('cta--pressed');
   });
 });
 

@@ -819,19 +819,43 @@
   box-shadow: inset 0 0 0 2px var(--ink-primary);
 }
 
-/* The price flash. `--ink-disabled` -> `--ink-primary` is the largest step the
-   ink ramp has, and it lands on the one thing the player needs to look at when
-   the tap did nothing: what it costs. Paired with the scale and the lock glyph,
-   never colour alone (§9). */
+/* The price flash. `--ink-disabled` -> `--ink-primary` lands on the one thing
+   the player needs to look at when the tap did nothing: what it costs.
+
+   It is the largest step the ink ramp has, but that is a smaller claim than it
+   sounds and the number is worth writing down: **2.92:1**, against 2.17:1 for
+   secondary -> primary and 1.35:1 for disabled -> secondary. DUB-39 lifted
+   `--ink-disabled` #6b6590 -> #9089b8 to clear AA at rest, which cost this step
+   40% of its contrast (it was 4.85:1 when first written). That was the right
+   trade — legible at rest beats dramatic on press — but it means the flash is a
+   supporting signal, not the one carrying the press. The ring at 14.21:1 against
+   the card and the 10 px of shrink are what a thumb actually reads; measured on
+   the live DOM in DUB-46 with this value in place, and it passes on both
+   engines. Paired with the scale and the lock glyph, never colour alone (§9). */
 .cta.cta--pressed:not(.cta--affordable) .cta__price,
 .cta:active:not(.cta--affordable) .cta__price {
   color: var(--ink-primary);
   transform: scale(1.1);
+  /* The price is right-aligned, so it should grow leftwards and leave its right
+     edge where it is. With the default centre origin the optical right gutter
+     goes 17 px -> 13.85 px on press, which reads as the price drifting towards
+     the edge rather than swelling in place (DUB-45 nit 2). */
+  transform-origin: right center;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  /* The scale goes, the ring and the price do not. Reduced motion removes
-     movement, not feedback — the same line the ★ celebration takes. */
+  /* The scale goes, the ring and the price colour do not. Reduced motion removes
+     movement, not feedback.
+
+     Not quite "the same line the ★ celebration takes", which is what this
+     comment used to claim: the ★ and the HUD meter key off the store's resolved
+     value, which folds this media query together with the Settings
+     `auto | on | off` toggle. This rule sees the media query only, so a player
+     who sets Reduced motion = on in Settings while their OS says nothing still
+     gets the shrink. Pre-existing and wider than the CTA — `.sheet` and `.card`
+     entrances have the same gap — so it is tracked as DUB-49 rather than fixed
+     here, where the fix is a class the store drives. The press still degrades
+     safely in the meantime: the ring and the price survive either way. */
   .cta.cta--pressed,
   .cta:active,
   .cta.cta--pressed:not(.cta--affordable) .cta__price,
