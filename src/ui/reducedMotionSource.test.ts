@@ -128,7 +128,43 @@ describe('App publishes the resolution', () => {
     expect(syncAt).toBeGreaterThan(-1);
     expect(rootAt).toBeGreaterThan(syncAt);
   });
+
+  it('publishes the class above the landscape early return, so the rotate prompt sees it', () => {
+    // The reason `.fatal__rotate-glyph` can read the resolved flag at all
+    // (DUB-66). Move `useMotionRootClass()` below this return and the rotate
+    // prompt silently falls back to the OS preference, which is the bug.
+    const rootAt = app.indexOf('useMotionRootClass();');
+    const returnAt = app.indexOf('if (landscape) return <RotatePrompt />;');
+    expect(returnAt).toBeGreaterThan(-1);
+    expect(rootAt).toBeLessThan(returnAt);
+  });
 });
+
+describe('the rotate prompt', () => {
+  it('freezes the glyph upright from the resolved flag, not the OS preference alone', () => {
+    // A landscape player cannot tap their way off this screen, so an infinite 2s
+    // 90° loop running against an explicit `on` is a WCAG 2.2.2 (Pause, Stop,
+    // Hide) failure with no exit. `rotate(0deg)` is the resting pose the
+    // `auto`/reduce row already shipped, and the copy carries the instruction.
+    expect(ruleBody('html.is-still .fatal__rotate-glyph')).toContain('animation: none');
+    expect(ruleBody('html.is-still .fatal__rotate-glyph')).toContain('transform: rotate(0deg)');
+  });
+
+  it('keeps rotating under an explicit `off`, the same as every other animation', () => {
+    // Row 2. `:not(.is-moving)` on the fallback is what buys this: before the
+    // fix a reduce-preferring OS froze the glyph even for a player who had
+    // switched reduced motion off.
+    expect(css).toContain(`${ROOT_SCOPE} .fatal__rotate-glyph`);
+    expect(css).not.toMatch(/^\s*\.fatal__rotate-glyph\s*\{\s*animation: none/m);
+  });
+});
+
+/** The declarations of the first rule with this exact selector. */
+function ruleBody(selector: string): string {
+  const at = css.indexOf(`${selector} {`);
+  if (at === -1) throw new Error(`no rule for \`${selector}\` in ui.css`);
+  return css.slice(at, css.indexOf('}', at));
+}
 
 describe('the buy button reads the store', () => {
   it('emits `cta--still` from the resolved flag', () => {
@@ -226,11 +262,24 @@ const MEDIA_AT_RULE = '@media (prefers-reduced-motion: reduce)';
 const ROOT_SCOPE = 'html:not(.is-moving)';
 
 /**
- * Screens that may precede the store, or replace the app outright, and that do
- * not actually *stop* under the media query — the boot spinner only slows, and
- * the rotate glyph's rotation is the instruction itself. Deliberately OS-only.
+ * The one screen that genuinely precedes the store. The boot spinner runs before
+ * the saved preference has been read, and its block slows the spin (900ms ->
+ * 2.4s) rather than stopping it, so there is no suppression here for the toggle
+ * to be heard about.
+ *
+ * `.fatal__rotate-glyph` was on this list and should not have been (DUB-66).
+ * Both halves of its recorded reason were false: `useMotionRootClass` runs above
+ * the landscape early return in `App.tsx`, so the root class *does* reach the
+ * rotate prompt; and the glyph *does* stop under the media query, which the
+ * `auto`/reduce row has always shipped with the copy carrying the instruction
+ * alone. The cost of the mistake was a 2s infinite 90° loop on an untappable
+ * screen, served to a player who had just asked Settings for less motion.
+ *
+ * A reason that does not hold is worse than no reason, so anything added here
+ * gets both halves checked: can the store speak for this screen, and does the
+ * media query actually stop the animation?
  */
-const OS_ONLY_SELECTORS = ['.boot__spinner', '.fatal__rotate-glyph'];
+const OS_ONLY_SELECTORS = ['.boot__spinner'];
 
 /**
  * Each root-scoped fallback and the resolved rule that has to exist alongside
@@ -241,6 +290,10 @@ const PAIRS = [
   { fallback: `${ROOT_SCOPE} .sheet`, resolved: 'html.is-still .sheet {' },
   { fallback: `${ROOT_SCOPE} .card`, resolved: 'html.is-still .card {' },
   { fallback: `${ROOT_SCOPE} .cta`, resolved: '.cta.cta--still.cta--pressed,' },
+  {
+    fallback: `${ROOT_SCOPE} .fatal__rotate-glyph`,
+    resolved: 'html.is-still .fatal__rotate-glyph {',
+  },
 ];
 
 function stripComments(source: string): string {
