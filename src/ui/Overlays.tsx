@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { OFFLINE_CAP_SECONDS, STATION_DEFS } from '../config/economy.ts';
 import { useGameStore } from '../state/store.ts';
+import { useFocusTrap } from './focusTrap.ts';
 import { formatCash, formatCashExact, formatDuration, formatMinutes } from './format.ts';
 
 /**
@@ -12,12 +13,17 @@ import { formatCash, formatCashExact, formatDuration, formatMinutes } from './fo
  * was away, the club carried on, here is the money.
  *
  * Tapping outside collects, exactly as tapping the button does. §9: never trap
- * the player in a modal they have to aim at.
+ * the player in a modal they have to aim at — which is about the *pointer*, and
+ * is why the scrim collects. The keyboard is trapped, because `aria-modal` says
+ * it is and because this card has one CTA and sat over a tabbable bottom bar
+ * behind its own scrim (DUB-72). Escape and Android back both still collect, via
+ * `App`'s `useOverlayDismissal`.
  */
 export function OfflineCard(): React.JSX.Element | null {
   const show = useGameStore((s) => s.showOffline);
   const offline = useGameStore((s) => s.offline);
   const actions = useGameStore((s) => s.actions);
+  const card = useFocusTrap<HTMLDivElement>(show);
 
   if (!show) return null;
 
@@ -25,7 +31,14 @@ export function OfflineCard(): React.JSX.Element | null {
     <div className="overlay">
       <div className="overlay__scrim" onPointerDown={actions.collectOffline} aria-hidden="true" />
 
-      <div className="card" role="dialog" aria-modal="true" aria-labelledby="offline-title">
+      <div
+        className="card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="offline-title"
+        ref={card}
+        tabIndex={-1}
+      >
         <h2 className="card__title" id="offline-title">
           The night carried on
         </h2>
@@ -168,6 +181,7 @@ export function ClubComplete(): React.JSX.Element | null {
   const lastCallFiredCount = useGameStore((s) => s.lastCallFiredCount);
   const baseIncome = useGameStore((s) => s.baseIncomePerSecond);
   const elapsedSeconds = useGameStore((s) => s.elapsedSeconds);
+  const card = useFocusTrap<HTMLDivElement>(show);
 
   if (!show) return null;
 
@@ -175,7 +189,17 @@ export function ClubComplete(): React.JSX.Element | null {
     <div className="overlay">
       <div className="overlay__scrim" onPointerDown={actions.acknowledgeComplete} aria-hidden="true" />
 
-      <div className="card card--tall" role="dialog" aria-modal="true" aria-labelledby="complete-title">
+      {/* The one overlay that can open *over* a sheet — the last upgrade is
+          bought in `BarsSheet` — so it is also the reason the trap is a stack
+          rather than one listener per dialog. See `focusTrap.ts`. */}
+      <div
+        className="card card--tall"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="complete-title"
+        ref={card}
+        tabIndex={-1}
+      >
         <div className="star-burst__stars" aria-hidden="true">
           <span className="star-burst__on">★</span>
           <span className="star-burst__on">★</span>

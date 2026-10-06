@@ -33,8 +33,11 @@
  *    and to QA on a device — the same split `ctaPress.test.ts` draws.
  *  - **Composited contrast.** The arithmetic below is flat-colour arithmetic. It
  *    is right for a ring on the sheet, the card or the room, and it says nothing
- *    about a ring under a translucent layer. There is exactly one such case
- *    today and it fails 1.4.11 — see `the ring behind the scrim` below.
+ *    about a ring under a translucent layer. There used to be exactly one such
+ *    case and it failed 1.4.11 at 2.27:1; DUB-72's focus trap removed the
+ *    surface, so there is no composited ring left to measure. If a translucent
+ *    layer is ever put over a *focusable* control again, this file cannot judge
+ *    it and `audit:focus` is what would notice.
  *  - **Clipping by anything but the two scroll containers.** Six `overflow:
  *    hidden` boxes clip without scrolling (`.meter__track`,
  *    `.star-progress__track`, `.confetti`, `.boot__progress`,
@@ -162,35 +165,13 @@ function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-/** `#rrggbb` as its three channels. */
-function channels(hex: string): [number, number, number] {
-  const n = Number.parseInt(/^#([0-9a-f]{6})$/i.exec(hex)![1]!, 16);
-  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
-}
-
-/** `#rrggbb` again after `over` is painted on top of it at `alpha`. */
-function composite(under: string, over: string, alpha: number): string {
-  const [ur, ug, ub] = channels(under);
-  const [or_, og, ob] = channels(over);
-  const mix = (u: number, o: number): string =>
-    Math.round(u * (1 - alpha) + o * alpha)
-      .toString(16)
-      .padStart(2, '0');
-
-  return `#${mix(ur, or_)}${mix(ug, og)}${mix(ub, ob)}`;
-}
-
-/** `rgb(r g b / p%)` -> its colour and its alpha, as written in the tokens. */
-function translucentToken(name: string): { readonly hex: string; readonly alpha: number } {
-  const value = resolve(token(name));
-  const match = /^rgb\(\s*(\d+)\s+(\d+)\s+(\d+)\s*\/\s*(\d+(?:\.\d+)?)%\s*\)$/.exec(value);
-  expect(match, `${name} is "${value}", not an rgb()-with-alpha colour`).not.toBeNull();
-
-  const hex = `#${[1, 2, 3]
-    .map((i) => Number.parseInt(match![i]!, 10).toString(16).padStart(2, '0'))
-    .join('')}`;
-  return { hex, alpha: Number.parseFloat(match![4]!) / 100 };
-}
+/*
+ * `channels`, `composite` and `translucentToken` lived here, to composite the
+ * ring and the room under `--scrim` at 72% and measure the 2.27:1 that came out.
+ * They went with the test that used them (DUB-72): no stop can be behind the
+ * scrim now, so there is no such pair of colours to measure. `git show` has them
+ * if the scrim ever needs weighing again.
+ */
 
 describe('the focus ring token', () => {
   it('exists, once, as tokens rather than as a literal at a call site', () => {
@@ -227,39 +208,18 @@ describe('the focus ring token', () => {
     }
   });
 
-  it('does not clear 3:1 behind the scrim — which is the trap`s job, not the ring`s', () => {
-    /*
-     * The known 1.4.11 gap, pinned rather than left for someone to re-find.
-     *
-     * `Sheet` renders `role="dialog" aria-modal="true"` with no focus trap and
-     * no `inert`, and `App` renders `<BottomBar />` before the sheet — so the
-     * three bar buttons stay in the tab ring while a sheet is open, behind
-     * `.overlay__scrim`. Tab lands there first, and the ring it draws is
-     * composited *under* the scrim: the scrim darkens the ring, not just the
-     * backdrop, and `--ink-primary` is far too light to survive that.
-     *
-     * No offset can fix it and no colour can either — `--ink-primary` sits at
-     * L 0.894 and only a ring below L 0.265 would clear 3:1 here. The fix is
-     * to stop focus getting behind the scrim at all, which is a change to the
-     * dialog and not to this stylesheet. Tracked in DUB-72, next to the
-     * keyboard-activation work in DUB-59.
-     *
-     * Not a regression: the browser default ring had exactly the same problem.
-     *
-     * If this test starts failing, something good probably happened. Check
-     * which: focus is now trapped (delete this test, the surface is gone), or
-     * the scrim/ring changed enough to clear 3:1 (move `behind the scrim` up
-     * into the list above).
-     */
-    const ring = resolve(token('--focus-ring-color'));
-    const scrim = translucentToken('--scrim');
-    const room = resolve(token('--bg-room'));
-
-    const ringUnderScrim = composite(ring, scrim.hex, scrim.alpha);
-    const roomUnderScrim = composite(room, scrim.hex, scrim.alpha);
-
-    expect(contrast(ringUnderScrim, roomUnderScrim)).toBeLessThan(3);
-  });
+  /*
+   * There was a fourth surface here: the room *behind the scrim*, where a stop
+   * left in the tab ring by an untrapped dialog drew a ring at 2.27:1. The test
+   * asserted the failure rather than hiding it, and said to delete it when the
+   * trap landed, because the surface would stop existing.
+   *
+   * It landed — `focusTrap.ts`, DUB-72 — and no stop can be behind the scrim any
+   * more, so there is nothing left to measure. What replaced the assertion is
+   * `focusTrap.test.ts` plus `npm run audit:focus`, which tabs all three sheets
+   * in a real browser and now reports 0 stops behind the scrim where it used to
+   * report 9.
+   */
 
   it('reaches less far than the tightest container it sits in (WCAG 2.4.11)', () => {
     // `.bottom-bar`'s block-start padding is the smallest gap between a control
