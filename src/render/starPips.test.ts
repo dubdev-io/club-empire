@@ -90,4 +90,18 @@ describe('the station tile pips', () => {
     );
     expect(CLUB_SCENE).toMatch(/pip\.tint\s*=\s*earned\s*\?\s*GOLD_VIP\s*:\s*INK_DISABLED;/);
   });
+
+  it('holds the unearned ☆ above the 3:1 non-text minimum', () => {
+    // DUB-75. Shape carrying the signal means the unearned pip is a 2-unit
+    // stroke, and the 0.5 inherited from the solid-grey era put that stroke at
+    // 2.25:1 against the tile. 0.75 is the measured floor that clears 3:1
+    // (peak luminance 114 vs a tile of 32 → 3.38:1).
+    expect(CLUB_SCENE).toMatch(/pip\.alpha\s*=\s*earned\s*\?\s*1\s*:\s*UNEARNED_PIP_ALPHA;/);
+    const alpha = /const UNEARNED_PIP_ALPHA = ([\d.]+);/.exec(CLUB_SCENE)?.[1];
+    expect(alpha, 'clubScene.ts should declare UNEARNED_PIP_ALPHA').toBeDefined();
+    // Bounded both ways on purpose: below 0.75 the stroke drops under 3:1,
+    // and at 1 the hollow star stops deferring to the gold filled one.
+    expect(Number(alpha)).toBeGreaterThanOrEqual(0.75);
+    expect(Number(alpha)).toBeLessThan(1);
+  });
 });

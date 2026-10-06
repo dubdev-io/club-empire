@@ -15,6 +15,13 @@
  * needed to read it. Two numbers close together would mean the stroke has
  * effectively filled the star in and the fix does nothing.
  *
+ * It also reports each pip's **peak luminance and its WCAG contrast against the
+ * tile behind it**, off the colour capture. That is DUB-75's criterion: carrying
+ * the signal in a 2-unit stroke only works if the stroke itself is visible, and
+ * a hollow shape can be unmistakably hollow and still be too dim to find. Ink
+ * coverage cannot see that — the two measurements fail in opposite directions,
+ * so both have to be printed or tuning one silently breaks the other.
+ *
  * The crop is computed, not eyeballed: the design space *is* 390x844, so
  * `stage.ts`'s letterbox scale is 1 at the review viewport and a design pixel is
  * a CSS pixel. Greyscale is applied in the page as a real CSS filter, so the
@@ -93,6 +100,12 @@ interface PipRead {
   readonly coverage: number;
   /** Mean luminance of the star's middle — solid for ★, background for ☆. */
   readonly centre: number;
+  /** Brightest pixel in the column, 8-bit. For a ☆ this is the stroke itself. */
+  readonly peak: number;
+  /** The tile behind the pip: the column's median pixel, which is mostly tile. */
+  readonly background: number;
+  /** WCAG 1.4.11 ratio of `peak` against `background`. Non-text wants >= 3. */
+  readonly contrast: number;
 }
 
 async function coverage(cdp: Cdp, pngBase64: string): Promise<PipRead[]> {
@@ -107,6 +120,12 @@ async function coverage(cdp: Cdp, pngBase64: string): Promise<PipRead[]> {
       const ctx = c.getContext('2d');
       ctx.drawImage(img, 0, 0);
       const lum = (d, i) => 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      // WCAG relative luminance, which linearises each channel *before* it
+      // weights them. Doing it the other way round, feeding the gamma-encoded
+      // lum above into the ratio, is close on a neutral grey and wrong on gold.
+      const srgb = (ch) => { const v = ch / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+      const rel = (d, i) => 0.2126 * srgb(d[i]) + 0.7152 * srgb(d[i + 1]) + 0.0722 * srgb(d[i + 2]);
+      const ratio = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
       const colWidth = img.width / 3;
       const out = [];
       for (let col = 0; col < 3; col++) {
@@ -114,11 +133,23 @@ async function coverage(cdp: Cdp, pngBase64: string): Promise<PipRead[]> {
         const w = Math.round(colWidth);
         const data = ctx.getImageData(x0, 0, w, img.height).data;
         let lit = 0, total = 0;
+        // Peak is tracked by true relative luminance and *reported* in 8-bit,
+        // so the printed number stays comparable with the ticket's table.
+        let peakRel = -1, peak8 = 0;
+        const lums = [];
         for (let i = 0; i < data.length; i += 4) {
           total += 1;
           // --bg-raised, the tile the pips sit on, is well under this.
           if (lum(data, i) > 70) lit += 1;
+          const r = rel(data, i);
+          if (r > peakRel) { peakRel = r; peak8 = lum(data, i); }
+          lums.push([r, lum(data, i)]);
         }
+        // The pip is a small bright shape on a tile, so the median pixel is the
+        // tile. Reading the background rather than hardcoding --bg-raised keeps
+        // the ratio honest about whatever the floor pulse did underneath it.
+        lums.sort((a, b) => a[0] - b[0]);
+        const [bgRel, bg8] = lums[Math.floor(lums.length / 2)];
         // The body of the star, a third of the pip box wide and centred on it.
         // A five-pointed star's waist sits well outside this, so a filled pip is
         // solid here and a hollow one is whatever is behind it.
@@ -131,6 +162,9 @@ async function coverage(cdp: Cdp, pngBase64: string): Promise<PipRead[]> {
         out.push({
           coverage: Math.round((lit / total) * 1000) / 10,
           centre: Math.round((sum / n) * 10) / 10,
+          peak: Math.round(peak8),
+          background: Math.round(bg8),
+          contrast: Math.round(ratio(peakRel, bgRel) * 100) / 100,
         });
       }
       return out;
@@ -190,7 +224,11 @@ async function main(): Promise<void> {
       );
 
       const name = `pips-lv${level}-dpr${dpr}`;
-      await shoot(cdp, `${OUT}/${name}.png`);
+      const colourData = await shoot(cdp, `${OUT}/${name}.png`);
+      // Contrast is read off the colour frame, because that is the one the
+      // player sees. Ink coverage is read off the greyscale frame below,
+      // because the thing it is asking about is what survives greyscale.
+      const colour = await coverage(cdp, colourData);
 
       await cdp.evaluate(`document.documentElement.style.filter = 'grayscale(1)'; return 1;`);
       await sleep(350);
@@ -204,6 +242,12 @@ async function main(): Promise<void> {
       console.log(
         `${name}  tap Lv ${reached}  greyscale  ` +
           cov.map((c) => `[ink ${c.coverage}% centre ${c.centre}]`).join(' '),
+      );
+      console.log(
+        `${' '.repeat(name.length)}  tap Lv ${reached}  colour     ` +
+          colour
+            .map((c) => `[peak ${c.peak} vs tile ${c.background} = ${c.contrast}:1]`)
+            .join(' '),
       );
     }
   }
