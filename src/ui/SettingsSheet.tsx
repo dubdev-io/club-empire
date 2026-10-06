@@ -30,11 +30,7 @@ export function SettingsSheet(): React.JSX.Element {
 
       <Toggle
         label="Reduced motion"
-        hint={
-          settings.reducedMotion === 'auto'
-            ? 'Following your device setting. Shake and confetti become a flash.'
-            : 'Shake and confetti become a flash. Feedback is never removed.'
-        }
+        hint={reducedMotionHint(settings.reducedMotion)}
         on={resolveReducedMotionToggle(settings.reducedMotion)}
         onChange={(on) => setSettings({ ...settings, reducedMotion: on ? 'on' : 'off' })}
       />
@@ -92,6 +88,26 @@ export function SettingsSheet(): React.JSX.Element {
       </div>
     </Sheet>
   );
+}
+
+/**
+ * The hint under the reduced-motion toggle, one line per setting value.
+ *
+ * All three values get their own sentence. A two-way ternary here described
+ * *on* whenever the setting was `off`, so a player who had just turned reduced
+ * motion off read that shake and confetti had become a flash — the control said
+ * Off and the copy under it said On (DUB-73).
+ *
+ * The `off` line also carries a disclosure the player would otherwise have to
+ * discover: an explicit `off` overrides the OS, so the sheet entrance, the card
+ * entrance and the buy-button press scale come back even on a device whose
+ * `prefers-reduced-motion` asks for less. That is the one state where we act
+ * against a stated device preference, so we say so at the control.
+ */
+export function reducedMotionHint(value: 'auto' | 'on' | 'off'): string {
+  if (value === 'auto') return 'Following your device setting. Shake and confetti become a flash.';
+  if (value === 'on') return 'Shake and confetti become a flash. Feedback is never removed.';
+  return 'Shake, confetti and button motion stay on, whatever your device asks for.';
 }
 
 /**
