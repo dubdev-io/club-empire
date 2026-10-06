@@ -25,9 +25,12 @@
  *    the module must act identically either way rather than throwing or
  *    quietly skipping a guard.
  *  - **the wiring.** `activationProps` is pure, so the set of handlers a
- *    control ends up with is checkable. All eight, always — six of them are
- *    load-bearing beyond the press class, and "the ones for the press are
- *    optional" is the mistake this pins against.
+ *    control ends up with is checkable, and so is which handler each prop
+ *    actually carries. All eight, always — every one of them is load-bearing
+ *    beyond the press class, and "the ones for the press are optional" is the
+ *    mistake this pins against. A prop pointing at the *wrong* handler is the
+ *    second one: it survives any check on the set of names, so each of the
+ *    eight also has a sequence only it can carry.
  *  - **the call sites.** That each of the thirteen routes through the module is
  *    a source assertion. Components are not unit-testable on the node
  *    environment, and a handler written inline at a call site is a handler
@@ -236,6 +239,23 @@ describe('the shared log, across controls of different kinds', () => {
  * The wiring. Eight handlers, the same eight everywhere.
  */
 describe('activationProps', () => {
+  /**
+   * A control wired the way a component is: through the props object, not
+   * through `activation` directly.
+   *
+   * Everything above this describe calls `activation` and so proves the
+   * *decision* is right. It says nothing about whether the eight props carry
+   * that decision to the eight events, and the key-set comparison below only
+   * proves the eight names exist. A prop pointing at the wrong handler — the
+   * mistake that looks most like a typo and least like a bug — passes both.
+   */
+  function wired(rest: { setPressed?: (pressed: boolean) => void } = {}) {
+    const onAct = vi.fn();
+    const clock = stoppedClock();
+
+    return { onAct, clock, props: activationProps({ log: createActivationLog(), clock, onAct, ...rest }) };
+  }
+
   const eight = [
     'onBlur',
     'onClick',
@@ -254,11 +274,13 @@ describe('activationProps', () => {
   });
 
   it('gives a control without one the same eight, not a shorter set', () => {
-    // The tempting mistake, and the reason this test exists: only `onBlur` is
-    // purely about the press class. The three release events refresh the
-    // suppression window and `onKeyUp` ends a repeat run, so trimming the set
-    // for a press-less control would reintroduce the double activation and the
-    // held-key repeat on twelve controls at once.
+    // The tempting mistake, and the reason this test exists: not one of the
+    // eight is only about the press class. The three release events refresh the
+    // suppression window, `onKeyUp` ends a repeat run, and since R5 `onBlur`
+    // clears the repeat stamp — so trimming the set for a press-less control
+    // would reintroduce the double activation, the held-key repeat, and an
+    // orphaned stamp that deafens every synthetic activation in the app, on
+    // twelve controls at once.
     const props = activationProps({ onAct: vi.fn() });
 
     expect(Object.keys(props).sort()).toEqual(eight);
@@ -271,6 +293,94 @@ describe('activationProps', () => {
     const props = activationProps({ onAct });
 
     props.onKeyDown({ key: 'Enter', repeat: false });
+    props.onClick({ detail: 0 });
+
+    expect(onAct).toHaveBeenCalledTimes(1);
+  });
+
+  // Each release prop refreshes the window rather than clearing it, and each is
+  // the only one of the three some real input delivers: touch is captured and
+  // always sends `up`, a scroll taking the gesture over sends `cancel`, a mouse
+  // dragged off the button sends `leave` and neither of the others. So the
+  // long-press guard has to survive arriving by any one of them alone.
+  for (const release of ['onPointerUp', 'onPointerCancel', 'onPointerLeave'] as const) {
+    it(`holds a long press to one action when it ends on \`${release}\` alone`, () => {
+      const { props, clock, onAct } = wired();
+
+      props.onPointerDown({ pointerId: MOUSE });
+      // Held past the window, so a window measured from the press has closed
+      // and only a refresh on the way up can still suppress the click.
+      clock.advance(POINTER_CLICK_WINDOW_MS + 1);
+      props[release]({ pointerId: MOUSE });
+      // `detail: 0` because the window is the guard under test: what a touch
+      // engine reports in `detail` for a compatibility click is exactly the
+      // thing the window exists not to trust.
+      clock.advance(300);
+      props.onClick({ detail: 0 });
+
+      expect(onAct).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('lets a keypress land on the button that was just tapped, which is `onKeyDown` clearing the window', () => {
+    const { props, onAct } = wired();
+
+    props.onPointerDown({ pointerId: MOUSE });
+    props.onPointerUp({ pointerId: MOUSE });
+    // No time passes: the tap's window is wide open, and a player who taps a
+    // button and then presses it has made two activations.
+    props.onKeyDown({ key: 'Enter', repeat: false });
+    props.onClick({ detail: 0 });
+
+    expect(onAct).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses the click a held Enter synthesises per repeat, which is `onKeyDown` reading `repeat`', () => {
+    const { props, onAct } = wired();
+
+    props.onKeyDown({ key: 'Enter', repeat: false });
+    props.onClick({ detail: 0 });
+    // Enter re-synthesises its click on every repeat, at ~30 Hz.
+    props.onKeyDown({ key: 'Enter', repeat: true });
+    props.onClick({ detail: 0 });
+    props.onKeyDown({ key: 'Enter', repeat: true });
+    props.onClick({ detail: 0 });
+
+    expect(onAct).toHaveBeenCalledTimes(1);
+  });
+
+  it('acts on a held Space when it is released, which is `onKeyUp` ending the repeat run', () => {
+    const { props, onAct } = wired();
+
+    // Space's genuine click follows its `keyup`, and Enter's repeat clicks
+    // never do — which is the whole way the two keys are told apart. Wired to
+    // anything but `keyUp` the repeat flag outlives the key, and a Space held a
+    // moment too long does nothing at all: the suppression meant for Enter's
+    // repeats eats the one click Space was going to make.
+    props.onKeyDown({ key: ' ', repeat: false });
+    props.onKeyDown({ key: ' ', repeat: true });
+    props.onKeyDown({ key: ' ', repeat: true });
+    props.onKeyUp({ key: ' ' });
+    props.onClick({ detail: 0 });
+
+    expect(onAct).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the press on `onBlur` and nothing else, so the release can still refresh', () => {
+    const setPressed = vi.fn();
+    const { props, clock, onAct } = wired({ setPressed });
+
+    props.onPointerDown({ pointerId: MOUSE });
+    props.onBlur();
+
+    expect(setPressed).toHaveBeenLastCalledWith(false);
+
+    // A blur is not the end of a pointer activation. Wired to `pointerEnd` it
+    // would end one here, the real release would find nothing outstanding to
+    // refresh, and the long press above would act twice again.
+    clock.advance(POINTER_CLICK_WINDOW_MS + 1);
+    props.onPointerUp({ pointerId: MOUSE });
+    clock.advance(300);
     props.onClick({ detail: 0 });
 
     expect(onAct).toHaveBeenCalledTimes(1);
