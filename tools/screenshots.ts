@@ -59,6 +59,26 @@ interface Shot {
 const FRESH = `localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)});`;
 
 /**
+ * Hold a finger on the first `.cta` whose label starts with `prefix`.
+ *
+ * A real `pointerdown`, dispatched at the element React delegates from, so the
+ * captured press is the button's own state. Deliberately never followed by a
+ * `pointerup`: the state has to survive until the screenshot, which is also
+ * what a finger resting on the glass does.
+ *
+ * Interpolated into a `drive` as `setTimeout(${PRESS_CTA}('...'), 400)` because
+ * the sheet it reaches into is opened by that same `drive` and React has not
+ * committed it yet.
+ */
+const PRESS_CTA = `((prefix) => () => {
+  const button = [...document.querySelectorAll('.cta')].find(
+    (el) => (el.querySelector('.cta__label')?.textContent ?? '').startsWith(prefix),
+  );
+  if (!button) throw new Error('no .cta labelled ' + prefix);
+  button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true }));
+})`;
+
+/**
  * A mid-run club, as a v3 save.
  *
  * Written through `localStorage` rather than built by clicking, so the
@@ -350,14 +370,114 @@ const SHOTS: readonly Shot[] = [
     drive: `window.__clubStore.getState().openSheet('door');`,
     settleMs: 700,
   },
+  {
+    // 20/21/22 are a set: the same BARS sheet at rest and then with a finger
+    // held on a button, which is the comparison DUB-38 turns on. Put 20 and 21
+    // side by side on the old code and the button *disappears* — it repainted
+    // to `--bg-raised`, the colour of the card it sits in, and dropped its
+    // `--bg-raised` border at the same moment.
+    //
+    // The press is dispatched as a real `pointerdown` on a real button, so what
+    // is captured is the component's own state, not a class poked in by the
+    // harness. No `pointerup` follows, so the state holds for the capture — the
+    // same thing a finger resting on the glass does.
+    name: '20-cta-rest',
+    note: 'BARS sheet, fresh club, nothing affordable — the buy buttons at rest, for 21 to be read against',
+    seed: FRESH,
+    drive: `
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      s.openSheet('bars');
+    `,
+    settleMs: 700,
+  },
+  {
+    // `+ Lane 2` and not `Upgrade to Lv 2`: a fresh club has earned ~£30 by the
+    // time the sheet is open, and the first upgrade costs £5, so the upgrade is
+    // *affordable* on second zero. The lane at £400 is the locked one, and it
+    // is the state this ticket is about — a tap that buys nothing.
+    name: '21-cta-pressed-locked',
+    note: 'the same sheet with a finger down on the locked + Lane — scale, ring, and the price flash (DUB-38)',
+    seed: FRESH,
+    drive: `
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      s.openSheet('bars');
+      setTimeout(${PRESS_CTA}('+ Lane'), 400);
+    `,
+    settleMs: 1200,
+  },
+  {
+    // The other half of the rule: the press has to read on a filled accent
+    // button too, where a ring in `--ink-primary` would be ~1.3:1 on cyan and
+    // the scale is doing the work on its own.
+    name: '22-cta-pressed-affordable',
+    note: 'a finger down on an affordable (filled) buy button — the press reads there as well',
+    seed: FRESH,
+    drive: `
+      window.__club.grant(60000);
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      s.openSheet('bars');
+      setTimeout(${PRESS_CTA}('Upgrade to Lv'), 400);
+    `,
+    settleMs: 1200,
+  },
+  {
+    // The third kind of dead-end tap, and the one the DUB-42 rebase created.
+    //
+    // A maxed row is `aria-disabled` but *not* `disabled`, so it is still
+    // tappable and §9 still wants an answer. It gets one: the handlers are
+    // attached unconditionally, so `cta--pressed` lands here too and the row
+    // takes the scale and the ring. It cannot take the price flash — a maxed
+    // row has a `.cta__done` badge where the price would be.
+    //
+    // This is the state to read against 11-club-complete, which is the same
+    // rows at rest. DUB-42 moved the `aria-disabled` dim off the button and
+    // onto the label so the gold badge clears AA; this shot is the check that
+    // the press does not undo that *at rest* — only while a finger is down.
+    name: '23-cta-pressed-maxed',
+    note: 'a finger down on a maxed row — scale and ring, no price flash, DUB-42 badge treatment intact',
+    seed: FRESH,
+    drive: `
+      window.__club.buyAll();
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      // buyAll() finishes the club, so the CLUB COMPLETE modal raises over the
+      // sheet. Dismissed the same way [KEEP PLAYING] dismisses it.
+      s.setShowComplete(false);
+      s.openSheet('bars');
+      setTimeout(${PRESS_CTA}('Lv 30'), 400);
+    `,
+    settleMs: 1200,
+  },
 ];
 
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional name filters from argv: `node tools/screenshots.ts 20-cta 21-cta`.
+ *
+ * The full set is two viewports of twenty-odd states and takes a few minutes.
+ * Re-capturing one pair after a one-line CSS change should not cost that, and
+ * a reviewer comparing two shots wants them taken minutes apart, not runs
+ * apart. No argument still means everything, so CI and `npm run shots` are
+ * unchanged.
+ */
+function selectedShots(): readonly Shot[] {
+  const filters = process.argv.slice(2);
+  if (filters.length === 0) return SHOTS;
+
+  const chosen = SHOTS.filter((shot) => filters.some((f) => shot.name.includes(f)));
+  if (chosen.length === 0) throw new Error(`no shot matches ${filters.join(', ')}`);
+  return chosen;
+}
+
 async function main(): Promise<void> {
   await mkdir(OUT_DIR, { recursive: true });
+  const shots = selectedShots();
 
   const cdp = await Cdp.connect(await pageTarget());
   await cdp.send('Page.enable');
@@ -374,7 +494,7 @@ async function main(): Promise<void> {
       mobile: viewport.mobile,
     });
 
-    for (const shot of SHOTS) {
+    for (const shot of shots) {
       await cdp.send('Emulation.setEmulatedMedia', {
         features: [
           { name: 'prefers-reduced-motion', value: shot.reducedMotion === true ? 'reduce' : 'no-preference' },
@@ -423,7 +543,11 @@ async function main(): Promise<void> {
     }
   }
 
-  await writeFile(`${OUT_DIR}/manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+  // Only a full run owns the manifest. A filtered run that rewrote it would
+  // leave a two-entry index next to twenty PNGs.
+  if (shots.length === SHOTS.length) {
+    await writeFile(`${OUT_DIR}/manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+  }
   cdp.close();
   console.log(`\n${manifest.length} screenshots in ${OUT_DIR}/`);
 }

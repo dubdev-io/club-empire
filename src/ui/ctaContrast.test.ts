@@ -142,7 +142,12 @@ describe('the MAXED badge clears AA (DUB-42)', () => {
     // `isDone` is `doneLabel !== undefined`, which is also the condition for
     // rendering `.cta__done`. Tying the class to the same flag is what keeps
     // the exemption from leaking onto an ordinary unaffordable button.
-    expect(SHEET_TSX).toMatch(/isDone \? ' cta--maxed' : ''/);
+    //
+    // DUB-38 moved class composition out of this file's reach and into
+    // `ctaClassName`, so what is checked here is the *wiring* — that the maxed
+    // input is still `isDone` and nothing else. The behaviour of the function it
+    // is handed to is pinned directly, as a unit test, in `ctaPress.test.ts`.
+    expect(SHEET_TSX).toMatch(/ctaClassName\(\{[^}]*\bmaxed:\s*isDone\b/);
     expect(SHEET_TSX).toMatch(/\{isDone \? \(\s*<span className="cta__done">/);
   });
 });
