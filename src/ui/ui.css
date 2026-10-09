@@ -621,6 +621,42 @@
   background: var(--ink-primary);
 }
 
+/* A setting plus its subordinate action. Named generically on purpose — the
+   next one reuses this rather than inventing a fourth thing. */
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  /* No gap. The action's own padding is the air above it, which keeps it
+     nearer the toggle it belongs to than the next setting. */
+}
+
+/* No `transition`, no `animation`, no `transform`: a control that exists to
+   restore the device's reduce-motion request must not itself animate. That is
+   also why it needs no `@media (prefers-reduced-motion)` rule. `:active` is an
+   instant repaint, so press feedback lands well inside the 100 ms budget. */
+.setting-revert {
+  align-self: flex-start;
+  min-height: var(--touch-min);
+  padding: var(--space-3);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  text-decoration: underline;
+  /* The one literal in this block: an optical nudge, with no offset scale to
+     belong to. */
+  text-underline-offset: 2px;
+}
+
+.setting-revert:active {
+  color: var(--ink-secondary);
+  background: var(--bg-raised);
+}
+
 .settings-reset {
   border-top: 1px solid var(--bg-raised);
   padding-top: var(--space-4);

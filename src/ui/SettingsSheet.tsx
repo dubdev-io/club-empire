@@ -19,6 +19,16 @@ export function SettingsSheet(): React.JSX.Element {
 
   const [confirmingReset, setConfirmingReset] = useState(false);
 
+  /**
+   * The whole behaviour change: discard the override and follow the device
+   * again. `useReducedMotionSync` (App.tsx) already re-subscribes to the media
+   * query whenever the preference changes, so writing `'auto'` recomputes the
+   * resolved boolean and reattaches the OS listener on its own. Nothing else
+   * is touched — in particular this is a settings patch, not a reset, so the
+   * saved club survives.
+   */
+  const revert = (): void => setSettings({ ...settings, reducedMotion: 'auto' });
+
   return (
     <Sheet title="Settings" onClose={closeSheet}>
       <Toggle
@@ -28,16 +38,50 @@ export function SettingsSheet(): React.JSX.Element {
         onChange={(audio) => setSettings({ ...settings, audio })}
       />
 
-      <Toggle
-        label="Reduced motion"
-        hint={
-          settings.reducedMotion === 'auto'
-            ? 'Following your device setting. Shake and confetti become a flash.'
-            : 'Shake and confetti become a flash. Feedback is never removed.'
-        }
-        on={resolveReducedMotionToggle(settings.reducedMotion)}
-        onChange={(on) => setSettings({ ...settings, reducedMotion: on ? 'on' : 'off' })}
-      />
+      {/*
+        The switch is two-state but the setting is three, so once a player taps
+        it `auto` is unreachable — and on a device that asks to reduce motion
+        the first tap lands on `off`, turning motion *on* against the device's
+        request (DUB-74). This action is the way back, and it does a second
+        job: its presence is what makes `auto` legible, without widening the
+        row into a three-state control.
+
+        It is a *sibling* of the toggle, never a child. `Toggle` renders a
+        `<button role="switch">`, and a nested button is invalid HTML and
+        unreachable by tap.
+      */}
+      <div className="setting-group">
+        <Toggle
+          label="Reduced motion"
+          hint={
+            settings.reducedMotion === 'auto'
+              ? 'Following your device setting. Shake and confetti become a flash.'
+              : 'Shake and confetti become a flash. Feedback is never removed.'
+          }
+          on={resolveReducedMotionToggle(settings.reducedMotion)}
+          onChange={(on) => setSettings({ ...settings, reducedMotion: on ? 'on' : 'off' })}
+        />
+
+        {settings.reducedMotion !== 'auto' && (
+          <button
+            type="button"
+            className="setting-revert"
+            // The visible string is contained in the accessible name, so
+            // WCAG 2.5.3 Label in Name holds.
+            aria-label="Reduced motion: follow my device setting"
+            // `onPointerDown` for the sub-100 ms touch response the rest of
+            // the UI holds itself to; the `click` guard is keyboard only. A
+            // keyboard-synthesised click carries `detail === 0` and a
+            // pointer-driven one does not, so a tap never fires this twice.
+            onPointerDown={revert}
+            onClick={(e) => {
+              if (e.detail === 0) revert();
+            }}
+          >
+            Follow my device setting
+          </button>
+        )}
+      </div>
 
       <Toggle
         label="Vibration"
