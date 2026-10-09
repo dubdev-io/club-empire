@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '../state/store.ts';
 import { activationProps } from './activation.ts';
+import { confirmFocusTarget } from './confirmFocus.ts';
 import { Sheet } from './Sheet.tsx';
 
 /**
@@ -26,6 +27,34 @@ export function SettingsSheet(): React.JSX.Element {
   const storageUnavailable = useGameStore((s) => s.storageUnavailable);
 
   const [confirmingReset, setConfirmingReset] = useState(false);
+
+  /*
+   * Both steps of the confirm unmount the button that was pressed, which
+   * drops focus to `<body>` — see `confirmFocus.ts` for why that is a WCAG
+   * 2.4.3 defect and why the repair has to land on "Keep it" rather than on
+   * the destructive button.
+   *
+   * The previous value is a ref and not state because changing it must not
+   * render: it is read inside the effect that the real state change already
+   * scheduled.
+   */
+  const revealRef = useRef<HTMLButtonElement | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const wasConfirmingRef = useRef(confirmingReset);
+
+  useEffect(() => {
+    const target = confirmFocusTarget({
+      confirming: confirmingReset,
+      wasConfirming: wasConfirmingRef.current,
+      // By the time an effect runs, React has already removed the old button
+      // and the browser has already moved focus off it.
+      focusLost: document.activeElement === null || document.activeElement === document.body,
+    });
+    wasConfirmingRef.current = confirmingReset;
+
+    if (target === 'cancel') cancelRef.current?.focus();
+    if (target === 'reveal') revealRef.current?.focus();
+  }, [confirmingReset]);
 
   return (
     <Sheet title="Settings" onClose={closeSheet}>
@@ -88,7 +117,13 @@ export function SettingsSheet(): React.JSX.Element {
             >
               Delete my club
             </button>
+            {/*
+              Focus lands here when the step opens, not on the button above
+              it. The reveal is a question, and the answer it arrives already
+              holding has to be the one that changes nothing.
+            */}
             <button
+              ref={cancelRef}
               type="button"
               className="cta cta--quiet"
               {...activationProps({ onAct: () => setConfirmingReset(false) })}
@@ -98,6 +133,7 @@ export function SettingsSheet(): React.JSX.Element {
           </div>
         ) : (
           <button
+            ref={revealRef}
             type="button"
             className="cta cta--quiet"
             {...activationProps({ onAct: () => setConfirmingReset(true) })}
