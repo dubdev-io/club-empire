@@ -108,6 +108,25 @@
    * sits outside the layout box, so unlike a wider `border` it cannot shove the
    * label and the price sideways.
    *
+   * The row that proves it is the *maxed* one, under reduced motion, and it has
+   * to be that row: a press is normally answered on three channels at once, and
+   * a maxed row has only the ring left — `.cta__done` sits where the price would
+   * be so there is no flash, and the reduced-motion block drops the scale. On
+   * any other row "focused and held look different" would pass for reasons that
+   * are not the ring's doing. Measured by `npm run audit:states`, at 1440x900:
+   *
+   *   focused vs pressed            4918 px differ
+   *   focused vs focused+pressed    2379 px differ
+   *   pressed vs focused+pressed    2540 px differ
+   *
+   * and the channels are additive, which is the signature of two axes rather
+   * than one: focus alone moves 2540 px, press alone 2378, both together 4918 —
+   * their sum. Put the focus ring on the press's own axis instead (`box-shadow:
+   * inset`, which is what the next engineer reaches for) and `focused` vs
+   * `focused+pressed` measures **0 px**: the identical render, on the one pair a
+   * keyboard player most needs to tell apart. That is a reproducible mutation
+   * rather than a worry, and `audit:states` exits non-zero on it.
+   *
    * Contrast, measured against the three *opaque* surfaces a ring lands on:
    * `--ink-primary` is 14.2:1 on `--bg-raised` (the station card), 16.1:1 on
    * `--bg-surface` (the sheet) and 17.7:1 on `--bg-room` — all far past the 3:1

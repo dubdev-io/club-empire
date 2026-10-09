@@ -83,6 +83,39 @@ function blockMatching(css: string, inSelector: string, inBody: string): string 
   return rules[0]![2]!;
 }
 
+/**
+ * Every `@media (prefers-reduced-motion: reduce)` block in the file, in full.
+ *
+ * `block` cannot read one: it slices to the first `}`, which inside an at-rule
+ * is the end of the *first nested rule* rather than the end of the block. And
+ * there are five of these in `ui.css`, so taking the first match by `indexOf`
+ * would silently read `.sheet`'s and claim something about the CTA's. Brace
+ * matching, all of them, so an assertion about "reduced motion" is about every
+ * place reduced motion is handled.
+ */
+function reducedMotionBlocks(css: string): readonly string[] {
+  const blocks: string[] = [];
+  const marker = '@media (prefers-reduced-motion: reduce)';
+
+  for (let at = css.indexOf(marker); at !== -1; at = css.indexOf(marker, at + 1)) {
+    const open = css.indexOf('{', at);
+    let depth = 0;
+    for (let i = open; i < css.length; i += 1) {
+      if (css[i] === '{') depth += 1;
+      else if (css[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          blocks.push(css.slice(open + 1, i));
+          break;
+        }
+      }
+    }
+  }
+
+  expect(blocks.length, 'no reduced-motion block at all').toBeGreaterThan(0);
+  return blocks;
+}
+
 /** `--name: value;` for one token, as written. */
 function token(name: string): string {
   const match = new RegExp(`${name}\\s*:\\s*([^;]+);`).exec(tokenRules);
@@ -309,6 +342,114 @@ describe('focus against the DUB-38 press', () => {
     expect(pressRing, 'the DUB-38 press ring moved').not.toBeNull();
 
     expect(pxToken('--focus-ring-offset')).toBeGreaterThanOrEqual(Number.parseInt(pressRing![1]!, 10));
+  });
+});
+
+/*
+ * The maxed row, which is the worst case rather than merely another one.
+ *
+ * Raised on DUB-50 from the DUB-91 re-review of DUB-38. A dead-end press is
+ * normally answered on three channels at once — the scale, the inset ring, and
+ * the price flash — so "focused and pressed look different" is easy to satisfy
+ * on a locked row for reasons that have nothing to do with the focus ring. A
+ * maxed row removes two of the three:
+ *
+ *  - the price flash cannot fire, because a maxed row renders `.cta__done`
+ *    where `.cta__price` would be and the flash rule has nothing to match;
+ *  - the scale is dropped under `prefers-reduced-motion: reduce`.
+ *
+ * Which leaves one channel, the rings, and makes this the row where a focus
+ * ring built on the press's own axis would render focused and held *identically*
+ * — the same pixels, not merely similar ones.
+ *
+ * These are source assertions, so what they can prove is that the two channels
+ * stay separate and that nothing re-dims or cancels the ring here. That the
+ * three renders actually differ is a pixel question, and `npm run audit:states`
+ * is the one that answers it: it drives this row into each state under reduced
+ * motion and counts the pixels between each pair.
+ */
+describe('the maxed row, where focus and press have the fewest channels (DUB-91)', () => {
+  it('does not dim its own focus ring, unlike every other aria-disabled control', () => {
+    /*
+     * `.cta[aria-disabled='true']` is `opacity: 0.55`, and `opacity` applies to
+     * the element's whole rendering — the `outline` included. So on an ordinary
+     * aria-disabled row the ring is *not* the token colour, and the 14.2:1 this
+     * file asserts above is not what gets painted.
+     *
+     * The maxed row escapes that by accident of DUB-42, which moved the dim off
+     * the button and onto the label so the gold MAXED badge could clear 4.5:1.
+     * The focus ring is a free rider on that opt-out, and this test is here so
+     * that it is a *noticed* free rider: reverting DUB-42's treatment would dim
+     * the ring on the one row this ticket is now verified against, and nothing
+     * else in the suite would say so.
+     */
+    const maxed = block(uiRules, ".cta--maxed[aria-disabled='true'] {");
+
+    expect(maxed).toContain('opacity: 1');
+  });
+
+  it('keeps a dimmed ring above 3:1 on the rows that do dim (WCAG 1.4.11)', () => {
+    /*
+     * The other half of the above, measured rather than waved at. A non-maxed
+     * `aria-disabled` row — buying switched off rather than finished — still
+     * dims, so its ring composites at 0.55 over the card.
+     *
+     * Still legal, but the margin is nothing like the headline figure: 14.2:1
+     * on `--bg-raised` becomes ~5.2:1. Pinned because the headline number is
+     * what a future reader will reach for, and because the two inputs that
+     * could cross 3:1 from here — a lighter card or a heavier dim — are both
+     * ordinary design changes rather than exotic ones.
+     */
+    const ring = resolve(token('--focus-ring-color'));
+    const dim = Number.parseFloat(block(uiRules, ".cta[aria-disabled='true'] {").match(/opacity:\s*([\d.]+)/)![1]!);
+
+    for (const surface of ['--bg-room', '--bg-surface', '--bg-raised']) {
+      const card = resolve(token(surface));
+      // `opacity` composites the element over its own backdrop, which for a
+      // ring held outside the button by the offset is the card.
+      const dimmed = composite(card, ring, dim);
+
+      expect(contrast(dimmed, card), `dimmed ring on ${surface}`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it('has no price to flash, so the press cannot borrow that channel', () => {
+    // The component fact the DUB-91 note turns on. If a maxed row ever grew a
+    // `.cta__price` again, the press would gain a second channel here and
+    // `audit:states` would stop being a test of the rings alone — it would
+    // start passing for the same reason the locked row does.
+    const sheet = readFileSync(new URL('./Sheet.tsx', import.meta.url), 'utf8');
+    const priceAt = sheet.indexOf('cta__price');
+    const doneAt = sheet.indexOf('cta__done');
+
+    expect(doneAt, 'the maxed row`s done badge').toBeGreaterThan(-1);
+    // Rendered as the two arms of one conditional, badge first — so a row has
+    // one or the other and never both.
+    expect(doneAt).toBeLessThan(priceAt);
+    expect(sheet.slice(doneAt, priceAt)).toContain(':');
+  });
+
+  it('keeps both rings when reduced motion takes the scale away', () => {
+    /*
+     * Reduced motion removes movement, not feedback. The CTA's block zeroes
+     * `transform`, which is the whole reason this row is the worst case — and
+     * it has to leave both rings alone. If it dropped the inset ring too, a
+     * maxed row under reduced motion would answer a press with nothing at all,
+     * and "pressed" would become the render identical to "rest" instead.
+     *
+     * Asserted across *every* reduced-motion block rather than the CTA's own,
+     * because a later rule anywhere in the file would cancel the ring just as
+     * effectively as that one would, and the ring's survival is the claim.
+     */
+    const blocks = reducedMotionBlocks(uiRules);
+
+    expect(blocks.some((b) => b.includes('transform: none'))).toBe(true);
+    for (const [index, body] of blocks.entries()) {
+      expect(body, `reduced-motion block ${index} cancels the press ring`).not.toContain('box-shadow');
+      expect(body, `reduced-motion block ${index} cancels the press border`).not.toContain('border-color');
+      // And nothing there may reach the focus ring, from either direction.
+      expect(body, `reduced-motion block ${index} touches the focus ring`).not.toContain('outline');
+    }
   });
 });
 

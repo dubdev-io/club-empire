@@ -29,6 +29,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { SAVE_STORAGE_KEY } from '../src/save/schema.ts';
 import { Cdp, pageTarget, sleep } from './cdp.ts';
+import { type Bitmap, decodePng } from './png.ts';
 
 const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:5173';
 const OUT_DIR = process.env.CLUB_SHOTS ?? 'screenshots';
@@ -288,6 +289,33 @@ const PRESS_CTA = `((prefix) => () => {
   if (!button) throw new Error('no .cta labelled ' + prefix);
   button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true }));
 })`;
+
+/**
+ * A finished club with the BARS sheet open — every row maxed (DUB-50).
+ *
+ * Shared by 23 and by 26/27/28 and by `--state-diff`, so that the row the diff
+ * measures is provably the row the shots photograph. Two drives that merely
+ * looked alike would make the diff's numbers evidence about a different button.
+ *
+ * `buyAll()` finishes the club, which raises the CLUB COMPLETE modal over the
+ * sheet; `setShowComplete(false)` dismisses it the way [KEEP PLAYING] does.
+ */
+const MAXED_BARS_SHEET = `
+  window.__club.buyAll();
+  const s = window.__clubStore.getState();
+  s.setStar(null);
+  s.setShowComplete(false);
+  s.openSheet('bars');
+`;
+
+/**
+ * The maxed buy row, as a `tabTo` predicate.
+ *
+ * Keyed on `.cta--maxed` rather than on the label text: the label is copy and
+ * DUB-55 is rewriting it, while the class is the thing `ui.css` keys the
+ * `opacity: 1` opt-out off and so is the thing this is actually about.
+ */
+const MAXED_CTA = `el.classList.contains('cta') && el.classList.contains('cta--maxed')`;
 
 /**
  * A mid-run club, as a v3 save.
@@ -651,13 +679,7 @@ const SHOTS: readonly Shot[] = [
     note: 'a finger down on a maxed row — scale and ring, no price flash, DUB-42 badge treatment intact',
     seed: FRESH,
     drive: `
-      window.__club.buyAll();
-      const s = window.__clubStore.getState();
-      s.setStar(null);
-      // buyAll() finishes the club, so the CLUB COMPLETE modal raises over the
-      // sheet. Dismissed the same way [KEEP PLAYING] dismisses it.
-      s.setShowComplete(false);
-      s.openSheet('bars');
+      ${MAXED_BARS_SHEET}
       setTimeout(${PRESS_CTA}('Lv 30'), 400);
     `,
     settleMs: 1200,
@@ -701,6 +723,67 @@ const SHOTS: readonly Shot[] = [
       s.openSheet('bars');
     `,
     tabTo: `el.classList.contains('cta') && (el.querySelector('.cta__label')?.textContent ?? '').startsWith('+ Lane')`,
+    hold: 'Space',
+    settleMs: 400,
+  },
+
+  // 26/27/28 are the same three-state comparison as 24/25, moved onto the
+  // worst row in the game and with the last escape hatch taken away (DUB-50,
+  // raised on the ticket from the DUB-91 re-review of DUB-38).
+  //
+  // Why the maxed row and not the locked one 24/25 use: a locked row answers a
+  // dead-end press on *three* channels — the scale, the inset ring, and the
+  // price flash. So "focused and pressed are different" is easy to satisfy
+  // there for a reason that has nothing to do with the ring, and a shot of it
+  // would pass even if the focus treatment were identical to the press.
+  //
+  // A maxed row strips the channels away one at a time:
+  //
+  //  - no price flash. A maxed row has a `.cta__done` badge where the price
+  //    would be, so `.cta__price` is not in the DOM and the flash rule has
+  //    nothing to match.
+  //  - no scale, under `prefers-reduced-motion: reduce` — the media block drops
+  //    `transform` for exactly the reason the ★ celebration does.
+  //
+  // What is left is one channel: the rings. Which is the point — if focus had
+  // been built as the `box-shadow: inset` the ticket warned the next engineer
+  // would reach for, these three PNGs would be two distinct renders and a
+  // duplicate, and the duplicate would be the pair a keyboard player most needs
+  // to tell apart. `--state-diff` measures that rather than leaving it to the
+  // eye; these are the pictures of what it measured.
+  {
+    name: '26-cta-maxed-rm-focused',
+    note: 'maxed row, reduced motion, focused by Tab — outset ring only, nothing inset (DUB-50)',
+    seed: FRESH,
+    reducedMotion: true,
+    drive: MAXED_BARS_SHEET,
+    tabTo: MAXED_CTA,
+    settleMs: 400,
+  },
+  {
+    // Pressed but *not* focused, and that is the second thing this shot proves.
+    // The press arrives as a `pointerdown`, which does move focus in Chrome —
+    // so a `:focus` rule would draw a ring here. `:focus-visible` does not, and
+    // the absence of an outset ring in this PNG is what that looks like.
+    name: '27-cta-maxed-rm-pressed',
+    note: 'the same row under a finger — inset press ring, no outset ring, no scale, no flash (DUB-50)',
+    seed: FRESH,
+    reducedMotion: true,
+    drive: `
+      ${MAXED_BARS_SHEET}
+      setTimeout(${PRESS_CTA}('Lv 30'), 400);
+    `,
+    settleMs: 1200,
+  },
+  {
+    // The render the DUB-91 note says would be byte-identical to 26 if focus
+    // and press shared an axis. White ring, 3px of card colour, white ring.
+    name: '28-cta-maxed-rm-focused-pressed',
+    note: 'the same row focused and held with Space — both rings, with the card showing between (DUB-50)',
+    seed: FRESH,
+    reducedMotion: true,
+    drive: MAXED_BARS_SHEET,
+    tabTo: MAXED_CTA,
     hold: 'Space',
     settleMs: 400,
   },
@@ -837,6 +920,214 @@ async function auditFocus(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// The state diff (DUB-50)
+// ---------------------------------------------------------------------------
+
+/**
+ * `npm run audit:states` — are focus, press, and both-at-once three different
+ * pictures of the same button?
+ *
+ * This exists because "visually distinct from the press ring" is the one
+ * acceptance criterion on DUB-50 that neither of the other two checks can
+ * reach. `focusRing.test.ts` reads the stylesheet as text on node, so the most
+ * it can prove is that one rule says `outline` and the other says `box-shadow:
+ * inset` — not that the result differs on screen. `audit:focus` reads the
+ * computed `outline-width`, so it proves a ring was *drawn* and is not clipped,
+ * but it never looks at a pixel. A PNG looks at every pixel and is read by a
+ * human who will not notice a regression six months from now.
+ *
+ * So: drive one button into three states, clip-capture it in each, and count
+ * the pixels that differ between each pair. The run fails if any pair is
+ * identical, which is the DUB-91 failure mode stated as an assertion —
+ * `box-shadow: inset` for the focus ring instead of `outline` makes 26 and 28
+ * the same picture, and this is what notices.
+ *
+ * Deliberately the maxed row under reduced motion, which is the row with the
+ * fewest signals left: no price flash (a `.cta__done` badge sits where the
+ * price would be) and no scale (the reduced-motion block drops `transform`).
+ * Any other row would pass this for reasons that are not the ring's doing.
+ */
+interface StateShot {
+  readonly label: string;
+  readonly tab: boolean;
+  readonly press: 'pointer' | 'space' | null;
+}
+
+const DIFF_STATES: readonly StateShot[] = [
+  { label: 'rest', tab: false, press: null },
+  { label: 'focused', tab: true, press: null },
+  { label: 'pressed', tab: false, press: 'pointer' },
+  { label: 'focused+pressed', tab: true, press: 'space' },
+];
+
+/**
+ * The pixels of one element's box, inflated so the outset ring is inside the
+ * capture.
+ *
+ * The inflation is not a guess: a clip tight to the border box would cut the
+ * `outline` off entirely, and the diff would then "prove" that focus changes
+ * nothing. Read off the element with `measureFocus` where possible so the
+ * capture follows the tokens rather than duplicating them.
+ */
+async function captureControl(cdp: Cdp, selector: string, pad: number): Promise<Bitmap> {
+  const box = await cdp.evaluate<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(`
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (el === null) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return null;
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  `);
+  if (box === null) throw new Error(`no element at ${selector}`);
+
+  const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
+    format: 'png',
+    captureBeyondViewport: false,
+    clip: {
+      x: box.x - pad,
+      y: box.y - pad,
+      width: box.width + pad * 2,
+      height: box.height + pad * 2,
+      scale: 1,
+    },
+  });
+  return decodePng(Buffer.from(data, 'base64'));
+}
+
+/** How many pixels differ, and by how much at the worst one. */
+function diff(a: Bitmap, b: Bitmap): { pixels: number; worst: number } {
+  if (a.width !== b.width || a.height !== b.height) {
+    throw new Error(`capture sizes differ: ${a.width}x${a.height} vs ${b.width}x${b.height}`);
+  }
+  let pixels = 0;
+  let worst = 0;
+  for (let i = 0; i < a.rgb.length; i += 3) {
+    const delta =
+      Math.abs(a.rgb[i]! - b.rgb[i]!) +
+      Math.abs(a.rgb[i + 1]! - b.rgb[i + 1]!) +
+      Math.abs(a.rgb[i + 2]! - b.rgb[i + 2]!);
+    if (delta > 0) pixels += 1;
+    if (delta > worst) worst = delta;
+  }
+  return { pixels, worst };
+}
+
+async function auditStates(): Promise<void> {
+  const cdp = await Cdp.connect(await pageTarget());
+  await cdp.send('Page.enable');
+  await cdp.send('Runtime.enable');
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+
+  const failures: string[] = [];
+
+  for (const viewport of VIEWPORTS) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: viewport.scale,
+      mobile: viewport.mobile,
+    });
+    // The whole point of the exercise: reduced motion, so the scale is gone and
+    // the rings are the only channel left.
+    await cdp.send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    });
+
+    console.log(
+      `\n=== ${viewport.name} ${viewport.width}x${viewport.height}, ` +
+        `prefers-reduced-motion: reduce, maxed buy row ===`,
+    );
+
+    const shots = new Map<string, Bitmap>();
+    let reach = 0;
+
+    for (const state of DIFF_STATES) {
+      await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
+      await sleep(400);
+      await cdp.evaluate(`${FRESH} return true;`);
+      await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
+
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await sleep(100);
+        const ready = await cdp
+          .evaluate<boolean>(`return Boolean(window.__clubStore) && Boolean(window.__club);`)
+          .catch(() => false);
+        if (ready) break;
+      }
+
+      await cdp.evaluate(`${MAXED_BARS_SHEET} return true;`);
+      await sleep(700);
+
+      // Mark the row so the clip and the shots are provably the same element,
+      // whatever the tab order or the copy happens to be.
+      const found = await cdp.evaluate<boolean>(`
+        const el = [...document.querySelectorAll('.cta.cta--maxed')][0];
+        if (!el) return false;
+        el.dataset.stateDiff = '1';
+        return true;
+      `);
+      if (!found) throw new Error('no .cta.cta--maxed on the BARS sheet after buyAll()');
+
+      if (state.tab) {
+        await tabTo(cdp, MAXED_CTA);
+        // `tabTo` already asserts a ring was drawn and is not clipped, so the
+        // reach it measured is the right pad for the clip.
+        const stop = await measureFocus(cdp);
+        reach = Math.max(reach, stop === null ? 0 : stop.ring + Math.max(stop.offset, 0));
+      }
+
+      if (state.press === 'pointer') {
+        await cdp.evaluate(`(${PRESS_CTA}('Lv 30'))(); return true;`);
+        await sleep(120);
+      } else if (state.press === 'space') {
+        await key(cdp, 'Space', 'keyDown');
+        await sleep(120);
+      }
+
+      // A pad of at least the ring's reach, plus a pixel so the outer edge of
+      // the ring is not the outermost row of the capture.
+      const pad = Math.ceil(Math.max(reach, 6)) + 1;
+      shots.set(state.label, await captureControl(cdp, '[data-state-diff]', pad));
+
+      if (state.press === 'space') await key(cdp, 'Space', 'keyUp');
+    }
+
+    const labels = DIFF_STATES.map((s) => s.label);
+    for (let i = 0; i < labels.length; i += 1) {
+      for (let j = i + 1; j < labels.length; j += 1) {
+        const a = labels[i]!;
+        const b = labels[j]!;
+        const { pixels, worst } = diff(shots.get(a)!, shots.get(b)!);
+        const verdict = pixels === 0 ? 'IDENTICAL' : 'distinct';
+        console.log(
+          `  ${a.padEnd(15)} vs ${b.padEnd(15)} ` +
+            `${String(pixels).padStart(6)} px differ, worst ${String(worst).padStart(3)}/765  ` +
+            verdict,
+        );
+        if (pixels === 0) {
+          failures.push(`${viewport.name}: "${a}" and "${b}" render identically on a maxed row`);
+        }
+      }
+    }
+  }
+
+  cdp.close();
+
+  if (failures.length > 0) {
+    console.error(`\nstate diff FAILED\n${failures.map((f) => `  - ${f}`).join('\n')}`);
+    process.exit(1);
+  }
+  console.log(
+    '\nstate diff passed: rest, focused, pressed and focused+pressed are four ' +
+      'different renders of the same maxed row, with no motion and no price flash.',
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
@@ -865,6 +1156,13 @@ async function main(): Promise<void> {
   // `screenshots/` behind.
   if (process.argv.includes('--focus-audit')) {
     await auditFocus();
+    return;
+  }
+
+  // `--state-diff` likewise: it captures, but it compares rather than saving,
+  // so nothing lands in `screenshots/`.
+  if (process.argv.includes('--state-diff')) {
+    await auditStates();
     return;
   }
 
