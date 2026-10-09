@@ -674,10 +674,6 @@
   letter-spacing: 0.08em;
 }
 
-.cta:active {
-  background: var(--bg-raised);
-}
-
 .cta--affordable {
   border-color: var(--cash-green);
 }
@@ -716,6 +712,36 @@
   opacity: 0.55;
 }
 
+/* A maxed row opts out of the button-level dim (DUB-42).
+ *
+ * `opacity` applies to the whole subtree and a child can never be *more* opaque
+ * than its parent. So while the dim sits on the button, the gold badge inside it
+ * composites to 4.31:1 against --bg-surface — under the 4.5:1 AA floor for
+ * 14px/600 text. The badge is the reward the player earned, and it is the one
+ * part of an inert row that still has to read.
+ *
+ * So the dim moves off the button and onto the label, which is the part that
+ * should dim. The label keeps exactly the 0.55 it had, so the row still reads as
+ * inert beside a live one; the badge goes to full --gold-vip, 11.7:1. Every
+ * other aria-disabled control keeps the rule above, untouched.
+ *
+ * Undimming the button also undims its own fill and border, which are not text
+ * and have no AA floor. Measured on the live page rather than assumed, because
+ * both depend on what is behind the row: on the BARS card (--bg-raised behind)
+ * the fill goes #1c192f -> #171527 and the border does not move at all; in the
+ * DOOR sheet (--bg-surface behind) the fill does not move and the border goes
+ * #1d1a30 -> #231f3a. Six parts in 255 at the worst, on a surface — small enough
+ * that pre-compositing them back would cost more than it buys, and it cannot be
+ * done in one declaration anyway when the backdrop differs per sheet.
+ */
+.cta--maxed[aria-disabled='true'] {
+  opacity: 1;
+}
+
+.cta--maxed[aria-disabled='true'] .cta__label {
+  opacity: 0.55;
+}
+
 .cta__label {
   text-align: left;
 }
@@ -724,8 +750,9 @@
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  /* --ink-disabled is non-text elsewhere; here it is paired with the lock
-     glyph so the state is never carried by the colour alone. */
+  /* Dimmer than the label so "you cannot afford this" still reads at a
+     glance, and paired with the lock glyph so the state is never colour
+     alone. */
   color: var(--ink-disabled);
 }
 
@@ -745,6 +772,96 @@
   font-size: var(--text-sm);
   letter-spacing: 0.08em;
   color: var(--gold-vip);
+}
+
+/* --- the pressed state (DUB-38) ------------------------------------------
+ *
+ * This used to be one declaration, `.cta:active { background: var(--bg-raised) }`,
+ * and it was worse than small. The buy buttons sit inside a `.station-row`,
+ * which *is* `--bg-raised`, and `.cta`'s border is `1px solid var(--bg-raised)`
+ * as well — so pressing a button repainted it to the exact colour of the card
+ * behind it and dropped its outline in the same frame. Measured on the live DOM
+ * at 390x844: 1:1 against the card. The button did not flash, it stopped
+ * existing, leaving the player holding a finger on two bits of floating text.
+ *
+ * The lesson is that a dark UI has no room left on the background axis — the
+ * only surface below `--bg-surface` is the room itself. So the press moves what
+ * the card cannot cancel:
+ *
+ *  - every variant shrinks, which is geometry and reads under a thumb where a
+ *    few per cent of luminance does not;
+ *  - a tap that buys nothing additionally gains a ring and lights its price,
+ *    because it has no state change of its own to be read as feedback. A tap
+ *    that *does* buy something is answered by the purchase: the cash falls, the
+ *    level moves, the fill may even drop away.
+ *
+ * Matched as `.cta.cta--pressed` (0,2,0), not `.cta--pressed` (0,1,0): the
+ * accent fills are `.cta--cyan.cta--affordable` and friends, also (0,2,0), and
+ * a one-class press selector would be out-specified by them on every
+ * purchasable button. `.cta--pressed` is set from `BuyButton`; `:active` is the
+ * mouse and keyboard path and carries the `.cta` buttons built by hand
+ * elsewhere (settings, the offline-return card).
+ *
+ * No transition, in or out — same reason as `.bar-button:active`. A tween
+ * between the tap and the response is the latency players read as
+ * "unresponsive".
+ */
+.cta.cta--pressed,
+.cta:active {
+  transform: scale(0.97);
+}
+
+.cta.cta--pressed:not(.cta--affordable),
+.cta:active:not(.cta--affordable) {
+  border-color: var(--ink-primary);
+  /* An inset ring rather than a thicker border: `border-width` is in the layout
+     box, so growing it on press would shove the label and the price sideways. */
+  box-shadow: inset 0 0 0 2px var(--ink-primary);
+}
+
+/* The price flash. `--ink-disabled` -> `--ink-primary` lands on the one thing
+   the player needs to look at when the tap did nothing: what it costs.
+
+   It is the largest step the ink ramp has, but that is a smaller claim than it
+   sounds and the number is worth writing down: **2.92:1**, against 2.17:1 for
+   secondary -> primary and 1.35:1 for disabled -> secondary. DUB-39 lifted
+   `--ink-disabled` #6b6590 -> #9089b8 to clear AA at rest, which cost this step
+   40% of its contrast (it was 4.85:1 when first written). That was the right
+   trade — legible at rest beats dramatic on press — but it means the flash is a
+   supporting signal, not the one carrying the press. The ring at 14.21:1 against
+   the card and the 10 px of shrink are what a thumb actually reads; measured on
+   the live DOM in DUB-46 with this value in place, and it passes on both
+   engines. Paired with the scale and the lock glyph, never colour alone (§9). */
+.cta.cta--pressed:not(.cta--affordable) .cta__price,
+.cta:active:not(.cta--affordable) .cta__price {
+  color: var(--ink-primary);
+  transform: scale(1.1);
+  /* The price is right-aligned, so it should grow leftwards and leave its right
+     edge where it is. With the default centre origin the optical right gutter
+     goes 17 px -> 13.85 px on press, which reads as the price drifting towards
+     the edge rather than swelling in place (DUB-45 nit 2). */
+  transform-origin: right center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The scale goes, the ring and the price colour do not. Reduced motion removes
+     movement, not feedback.
+
+     Not quite "the same line the ★ celebration takes", which is what this
+     comment used to claim: the ★ and the HUD meter key off the store's resolved
+     value, which folds this media query together with the Settings
+     `auto | on | off` toggle. This rule sees the media query only, so a player
+     who sets Reduced motion = on in Settings while their OS says nothing still
+     gets the shrink. Pre-existing and wider than the CTA — `.sheet` and `.card`
+     entrances have the same gap — so it is tracked as DUB-49 rather than fixed
+     here, where the fix is a class the store drives. The press still degrades
+     safely in the meantime: the ring and the price survive either way. */
+  .cta.cta--pressed,
+  .cta:active,
+  .cta.cta--pressed:not(.cta--affordable) .cta__price,
+  .cta:active:not(.cta--affordable) .cta__price {
+    transform: none;
+  }
 }
 
 /* =========================================================================

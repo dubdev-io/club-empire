@@ -53,6 +53,7 @@ node tools/autobuy.ts --tap   # ...with a player collecting every bubble
 
 npm run shots            # all ten states at 390x844 and 1440x900
 npm run measure:frames   # per-system frame time at the §11 entity ceiling
+npm run measure:contrast # WCAG ratios off the painted pixels, not the stylesheet
 npm run measure:boot -- 1 6 10 20   # the boot progress bar against the 1 s gate
 ```
 
@@ -61,6 +62,12 @@ The first runs a closed-form model, the second runs the real `ClubState` through
 the real purchase functions — so a divergence between the signed-off model and
 the shipping game shows up as two different sets of numbers rather than as two
 tools that both pass.
+
+`measure:contrast` reads the colours Chrome actually painted over each probe's
+box and reports the WCAG ratio, with the before figure from the same run. A ratio
+worked out from `tokens.css` misses whatever an ancestor `opacity` did to the
+text: that is how the MAXED badge came to be quoted at 3.13:1 when it rendered at
+4.31:1 (DUB-42).
 
 `measure:boot` is the DUB-21 regression instrument: it drives a cold load at a
 range of CPU throttles and reports how many **milliseconds** the boot screen was
@@ -89,8 +96,8 @@ measured nothing at all: no load still booting at the threshold, or no boot
 screen on the page. An instrument with no opinion must not report a pass, which
 is the false green both earlier versions of this tool managed to produce.
 
-`shots` and `measure:frames` need a dev server and a headless Chrome with remote
-debugging:
+`shots`, `measure:frames` and `measure:contrast` need a dev server and a headless
+Chrome with remote debugging:
 
 ```bash
 npm run dev &
