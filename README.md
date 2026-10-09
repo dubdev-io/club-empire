@@ -134,7 +134,8 @@ src/
 tools/
   economy-sim.ts        the economy model vs the §4.4 table
   autobuy.ts            the shipping game vs the §4.4 table (criterion 1)
-  screenshots.ts        all ten states, both viewports, over CDP
+  screenshots.ts        every state at both review viewports, plus the
+                        rotate prompt turned to landscape, over CDP
   frametime.ts          per-system frame time at the §11 ceiling (criterion 8)
 ```
 
