@@ -16,11 +16,26 @@
  * It reports the **before** figure in the same run, by removing the class under
  * test from the live element and measuring again. One run, both numbers, same
  * browser, same font rasterisation.
+ *
+ * A measurement harness that reports a wrong number is worse than no harness,
+ * because the number carries authority. So three things here are deliberately
+ * paranoid rather than merely convenient (DUB-54):
+ *
+ *  - every navigation waits for the *new* document to be the one answering, so
+ *    a readiness poll can never be satisfied by the page being left behind;
+ *  - every box is read twice `SETTLE_MS` apart and used only once the two reads
+ *    agree, so a clip cannot land where the row used to be;
+ *  - every scene stamps the document it was set up on and every probe checks
+ *    the stamp, so a reload underneath a measurement re-drives the scene
+ *    instead of reporting the home screen's pixels as the badge's;
+ *  - the glyph colour has to cover `glyphFloor` pixels, and the run prints how
+ *    many it covered, so no single antialiased pixel can set a ratio.
  */
 
-import { inflateSync } from 'node:zlib';
 import { SAVE_STORAGE_KEY } from '../src/save/schema.ts';
-import { Cdp, pageTarget, sleep } from './cdp.ts';
+import { Cdp, navigate, pageTarget, retry, sleep } from './cdp.ts';
+import type { Sample } from './pixels.ts';
+import { contrast, decodePng, hex, sample } from './pixels.ts';
 
 const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:5173';
 
@@ -104,176 +119,6 @@ const SCENES: readonly Scene[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// A PNG reader, because CDP hands back a PNG and we need the pixels
-// ---------------------------------------------------------------------------
-
-interface Bitmap {
-  readonly width: number;
-  readonly height: number;
-  /** RGB triplets, row-major, alpha dropped — a screenshot is already flat. */
-  readonly rgb: Uint8Array;
-}
-
-/** Decode a non-interlaced 8-bit RGB/RGBA PNG. That is all Chrome emits here. */
-function decodePng(png: Buffer): Bitmap {
-  if (png.readUInt32BE(0) !== 0x89504e47) throw new Error('not a PNG');
-
-  let width = 0;
-  let height = 0;
-  let channels = 0;
-  const idat: Buffer[] = [];
-
-  for (let at = 8; at + 8 <= png.length;) {
-    const length = png.readUInt32BE(at);
-    const type = png.toString('ascii', at + 4, at + 8);
-    const body = png.subarray(at + 8, at + 8 + length);
-    at += 12 + length; // length + type + data + CRC
-
-    if (type === 'IHDR') {
-      width = body.readUInt32BE(0);
-      height = body.readUInt32BE(4);
-      const depth = body[8];
-      const colourType = body[9];
-      const interlace = body[12];
-      if (depth !== 8 || interlace !== 0 || (colourType !== 2 && colourType !== 6)) {
-        throw new Error(
-          `unsupported PNG: depth ${depth}, colour type ${colourType}, interlace ${interlace}`,
-        );
-      }
-      channels = colourType === 6 ? 4 : 3;
-    } else if (type === 'IDAT') {
-      idat.push(body);
-    } else if (type === 'IEND') {
-      break;
-    }
-  }
-
-  const raw = inflateSync(Buffer.concat(idat));
-  const stride = width * channels;
-  const out = new Uint8Array(width * height * 3);
-  // One scanline of reconstructed bytes, kept for the Up/Average/Paeth filters.
-  let previous = new Uint8Array(stride);
-  let current = new Uint8Array(stride);
-
-  for (let y = 0; y < height; y += 1) {
-    const filter = raw[y * (stride + 1)];
-    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
-
-    for (let i = 0; i < stride; i += 1) {
-      const x = line[i]!;
-      const a = i >= channels ? current[i - channels]! : 0;
-      const b = previous[i]!;
-      const c = i >= channels ? previous[i - channels]! : 0;
-      let value: number;
-      switch (filter) {
-        case 0:
-          value = x;
-          break;
-        case 1:
-          value = x + a;
-          break;
-        case 2:
-          value = x + b;
-          break;
-        case 3:
-          value = x + ((a + b) >> 1);
-          break;
-        case 4: {
-          const p = a + b - c;
-          const pa = Math.abs(p - a);
-          const pb = Math.abs(p - b);
-          const pc = Math.abs(p - c);
-          value = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
-          break;
-        }
-        default:
-          throw new Error(`unknown PNG filter ${String(filter)}`);
-      }
-      current[i] = value & 0xff;
-    }
-
-    for (let x = 0; x < width; x += 1) {
-      const from = x * channels;
-      const to = (y * width + x) * 3;
-      out[to] = current[from]!;
-      out[to + 1] = current[from + 1]!;
-      out[to + 2] = current[from + 2]!;
-    }
-
-    const swap = previous;
-    previous = current;
-    current = swap;
-  }
-
-  return { width, height, rgb: out };
-}
-
-// ---------------------------------------------------------------------------
-// WCAG
-// ---------------------------------------------------------------------------
-
-type Rgb = readonly [number, number, number];
-
-/** WCAG 2.x relative luminance of an 8-bit sRGB triplet. */
-function luminance([r, g, b]: Rgb): number {
-  const channel = (v: number): number => {
-    const s = v / 255;
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-}
-
-function contrast(a: Rgb, b: Rgb): number {
-  const la = luminance(a);
-  const lb = luminance(b);
-  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
-}
-
-const hex = ([r, g, b]: Rgb): string =>
-  `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')}`;
-
-/**
- * Pick the glyph colour and the surface colour out of a patch of text.
- *
- * The surface is the most common pixel: a text box is mostly background. The
- * glyph is the pixel furthest from it in luminance — the interior of a stem,
- * where antialiasing has not diluted the colour. Taking the extreme rather than
- * an average is deliberate: WCAG asks about the text colour as specified, and
- * an average over a glyph's soft edge would flatter every ratio.
- */
-function sample(bitmap: Bitmap): { text: Rgb; surface: Rgb; pixels: number } {
-  const counts = new Map<number, number>();
-  for (let i = 0; i < bitmap.rgb.length; i += 3) {
-    const key = (bitmap.rgb[i]! << 16) | (bitmap.rgb[i + 1]! << 8) | bitmap.rgb[i + 2]!;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-
-  let surfaceKey = 0;
-  let best = -1;
-  for (const [key, count] of counts) {
-    if (count > best) {
-      best = count;
-      surfaceKey = key;
-    }
-  }
-  const surface: Rgb = [(surfaceKey >> 16) & 0xff, (surfaceKey >> 8) & 0xff, surfaceKey & 0xff];
-  const surfaceLuminance = luminance(surface);
-
-  let text = surface;
-  let furthest = 0;
-  for (const key of counts.keys()) {
-    const pixel: Rgb = [(key >> 16) & 0xff, (key >> 8) & 0xff, key & 0xff];
-    const distance = Math.abs(luminance(pixel) - surfaceLuminance);
-    if (distance > furthest) {
-      furthest = distance;
-      text = pixel;
-    }
-  }
-
-  return { text, surface, pixels: bitmap.width * bitmap.height };
-}
-
-// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
@@ -284,26 +129,267 @@ interface Box {
   height: number;
 }
 
+/** How far apart the two agreeing reads of a box have to be. */
+const SETTLE_MS = 500;
+
+/**
+ * Scroll a probe into view inside whatever is scrolling it.
+ *
+ * `.sheet__body` is `overflow-y: auto`, so a row can sit outside the sheet's
+ * visible area while `getBoundingClientRect()` still reports a perfectly
+ * ordinary position for it — one that the ancestor has clipped away. The pixels
+ * at those coordinates belong to whatever *is* painted there. That is how the
+ * badge probe came back as the cyan `+ Lane 2` fill a row below (DUB-54), and
+ * no amount of waiting fixes it: the wrong box is completely stable.
+ */
+async function scrollIntoView(cdp: Cdp, selector: string): Promise<void> {
+  await cdp
+    .evaluate(`
+      document
+        .querySelector(${JSON.stringify(selector)})
+        ?.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      return true;
+    `)
+    .catch(() => null);
+}
+
+/**
+ * One read of an element's box, plus whether the element is what is actually
+ * painted there.
+ *
+ * The hit test is the part that matters. `document.elementFromPoint` answers
+ * the only question a pixel-measurement tool really has — "do the pixels at
+ * these coordinates belong to my probe?" — and it answers it against the same
+ * composited, clipped, stacking-ordered reality the screenshot will sample. A
+ * rect alone cannot: it survives being scrolled out of an `overflow` ancestor,
+ * being covered by an overlay, and being `clip-path`ed away.
+ */
+async function readBox(cdp: Cdp, selector: string): Promise<{ box: Box; painted: boolean } | null> {
+  return cdp
+    .evaluate<{ box: Box; painted: boolean } | null>(`
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (el === null) return null;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return null;
+
+      // Centre of the box, which is inside a glyph's row rather than on the
+      // boundary where a rounding difference would pick the neighbour.
+      const x = r.x + r.width / 2;
+      const y = r.y + r.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      // The probe itself, or the span the text actually lives in: either way
+      // the pixels at the centre belong to this element's subtree.
+      const painted = hit !== null && (el === hit || el.contains(hit) || hit.contains(el));
+
+      return { box: { x: r.x, y: r.y, width: r.width, height: r.height }, painted };
+    `)
+    .catch(() => null);
+}
+
+const sameBox = (a: Box, b: Box): boolean =>
+  a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+
+/**
+ * An element's box, once it has stopped moving and is genuinely on screen.
+ *
+ * Two independent things have to hold before a clip is worth taking.
+ *
+ * It has to have stopped moving: a non-zero width is not a settled layout, and
+ * the sheet animates in, so the box can be read at one position and the
+ * screenshot clipped after the row has moved. Two reads `SETTLE_MS` apart have
+ * to agree. No flat sleep can do this job — 300 ms is too short for the ★
+ * celebration to clear the sheet at 390x844 and wasted time once it has.
+ *
+ * And the probe has to be the thing painted at those coordinates, which the
+ * hit test in `readBox` establishes. A stable box is not necessarily a visible
+ * one.
+ */
+async function stableBox(cdp: Cdp, selector: string, timeoutMs = 15_000): Promise<Box | null> {
+  await scrollIntoView(cdp, selector);
+
+  const deadline = Date.now() + timeoutMs;
+  let previous = await readBox(cdp, selector);
+  while (Date.now() < deadline) {
+    await sleep(SETTLE_MS);
+    const current = await readBox(cdp, selector);
+    if (
+      current !== null &&
+      previous !== null &&
+      current.painted &&
+      sameBox(previous.box, current.box)
+    ) {
+      return current.box;
+    }
+    previous = current;
+  }
+  return null;
+}
+
+/**
+ * Wait until the game has booted on the current document.
+ *
+ * Generous on purpose. The first scene of a run loads a **cold** dev server,
+ * so Vite is transforming the module graph on demand while Chrome is bringing
+ * up a software WebGL context and generating every texture; `window.__club`
+ * only exists once `startGame` has resolved past all of that. A 6 s budget
+ * measured the second and later scenes fine and lost the first one outright.
+ * The deadline is here to produce a clear error, not to bound a healthy run —
+ * a warm scene gets past it in well under a second.
+ */
+async function waitForBoot(cdp: Cdp, scene: string, timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const booted = await cdp
+      .evaluate<boolean>('return Boolean(window.__clubStore) && Boolean(window.__club);')
+      .catch(() => false);
+    if (booted) return;
+    await sleep(100);
+  }
+  throw new Error(`the game did not boot within ${timeoutMs} ms for scene "${scene}"`);
+}
+
+/**
+ * The document was replaced while a scene was being measured.
+ *
+ * Not a failure of the thing under test, so it must not be reported as one —
+ * the scene has to be driven again instead.
+ */
+class SceneLost extends Error {}
+
+/**
+ * Mark the current document as the one this scene was set up on.
+ *
+ * Driving a scene and then measuring it assumes the page stays put in between,
+ * and on a **cold** dev server it does not: Vite discovers a dependency it has
+ * not pre-bundled, optimises it, and force-reloads the page. The club boots
+ * again from scratch with no sheet open, and every probe after that point is
+ * clipped against the home screen. It produced a confident `NO GLYPH` for the
+ * badge and a 2.26:1 FAIL for a 12.45:1 probe — the same authoritative-but-
+ * wrong number DUB-54 is about, from a different direction.
+ *
+ * A full reload replaces `window`, so a token on it is gone exactly when the
+ * scene is gone. That is a fact about the document rather than a guess about
+ * timing, which is the only kind of check worth having here.
+ */
+let nextToken = 1;
+
+async function stampScene(cdp: Cdp): Promise<number> {
+  const token = nextToken++;
+  await cdp.evaluate(`window.__clubScene = ${String(token)}; return true;`);
+  return token;
+}
+
+async function holdsScene(cdp: Cdp, token: number): Promise<boolean> {
+  return cdp
+    .evaluate<boolean>(`return window.__clubScene === ${String(token)};`)
+    .catch(() => false);
+}
+
+async function assertScene(cdp: Cdp, token: number, what: string): Promise<void> {
+  if (!(await holdsScene(cdp, token))) throw new SceneLost(`the page reloaded under ${what}`);
+}
+
+/**
+ * Load the page until it stays loaded.
+ *
+ * On a cold dev server the first load is where Vite pre-bundles the dependency
+ * graph and then force-reloads once, and it is much better to spend that reload
+ * here than inside the first scene. Same shape as `stableBox`: stamp the
+ * document and require the stamp to survive two checks `SETTLE_MS` apart, so
+ * "settled" is something observed rather than a sleep long enough to hope for.
+ */
+async function warmUp(cdp: Cdp, timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  await navigate(cdp, `${BASE_URL}/`);
+  while (Date.now() < deadline) {
+    await waitForBoot(cdp, 'warm-up');
+    const token = await stampScene(cdp);
+    await sleep(SETTLE_MS);
+    if (await holdsScene(cdp, token)) return;
+    // The optimiser reloaded us. Let the new document boot and check again.
+  }
+  throw new Error(`the page kept reloading for ${timeoutMs} ms; the dev server never settled`);
+}
+
 /** The painted colours over one element's box, at 4x for a clean glyph core. */
-async function measure(
-  cdp: Cdp,
-  selector: string,
-): Promise<{ text: Rgb; surface: Rgb; pixels: number } | null> {
-  const box = await cdp.evaluate<Box | null>(`
-    const el = document.querySelector(${JSON.stringify(selector)});
-    if (el === null) return null;
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return null;
-    return { x: r.x, y: r.y, width: r.width, height: r.height };
-  `);
+async function measure(cdp: Cdp, selector: string, token: number): Promise<Sample | null> {
+  await assertScene(cdp, token, `the box read for ${selector}`);
+  const box = await stableBox(cdp, selector);
   if (box === null) return null;
 
-  const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
-    format: 'png',
-    captureBeyondViewport: false,
-    clip: { ...box, scale: 4 },
+  // Generous, and more generous on each retry. A clip over a live WebGL canvas
+  // is genuinely expensive rather than merely occasionally stuck: measured at
+  // 2.4 s to 5.3 s per capture on a loaded container, climbing across a run.
+  // A short timeout here does not catch a stall, it manufactures one — and
+  // then the retry re-issues a request that was always going to be slow.
+  let attempt = 0;
+  const { data } = await retry(`screenshot of ${selector}`, () => {
+    attempt += 1;
+    return cdp.send<{ data: string }>(
+      'Page.captureScreenshot',
+      { format: 'png', captureBeyondViewport: false, clip: { ...box, scale: 4 } },
+      30_000 * attempt,
+    );
   });
+  // Checked after as well as before: a reload between the box read and the
+  // capture is the window that produced the wrong pixels in the first place.
+  await assertScene(cdp, token, `the screenshot of ${selector}`);
   return sample(decodePng(Buffer.from(data, 'base64')));
+}
+
+/**
+ * Drive one scene and measure every probe on it, re-driving if the page is
+ * replaced underneath.
+ *
+ * Nothing is printed until the whole scene has been measured on one document.
+ * A scene that is retried therefore reports once and cleanly, rather than
+ * leaving half a block of numbers taken from a page that no longer exists.
+ */
+async function measureScene(cdp: Cdp, scene: Scene, attempts = 3): Promise<number> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      // Clear the save on the no-boot page first, then load the real one. A
+      // scene that drives `buyAll()` writes that club to `localStorage` on
+      // `pagehide`, and the next scene would load it: the BARS scene silently
+      // became "everything already maxed", with no affordable row left to
+      // compare against. Same ordering as `screenshots.ts`, for the same reason.
+      //
+      // `navigate` does not return until the new document is the one
+      // answering. Polling readiness without that barrier lets the *previous*
+      // scene's booted page satisfy `window.__club !== undefined`, so the drive
+      // script runs against a document that is about to be destroyed and the
+      // whole scene is measured on a page nobody set up (DUB-54).
+      await navigate(cdp, `${BASE_URL}/?noboot=1`);
+      await cdp.evaluate(
+        `localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)}); return true;`,
+      );
+
+      await navigate(cdp, `${BASE_URL}/`);
+      await waitForBoot(cdp, scene.name);
+      await cdp.evaluate(`${scene.drive} return true;`);
+
+      // Wait for the badge row to stop moving, not merely to exist. `buyAll()`
+      // fires the ★ celebration and the sheet animates in behind it; how long
+      // that takes is not something to guess at — a 900 ms sleep measured the
+      // DOOR sheet correctly at 1440x900 and found nothing at all at 390x844,
+      // and a 300 ms one read the box mid-animation.
+      if ((await stableBox(cdp, BADGE.selector)) === null) {
+        throw new Error(`the MAXED badge never settled for scene "${scene.name}"`);
+      }
+
+      // Stamped after the scene is standing, so the token covers exactly the
+      // document the probes are about to be measured on.
+      const token = await stampScene(cdp);
+      const { failures, lines } = await report(cdp, scene.probes, token);
+      for (const line of lines) console.log(line);
+      return failures;
+    } catch (error) {
+      if (!(error instanceof SceneLost) || attempt >= attempts) throw error;
+      console.warn(
+        `  ${error.message} — driving "${scene.name}" again (${String(attempt)}/${String(attempts - 1)})`,
+      );
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -311,6 +397,11 @@ async function main(): Promise<void> {
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
   await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+
+  // Absorb the cold dev server's pre-bundle reload before measuring anything.
+  // The scene retry in `measureScene` is the correctness guarantee; this is
+  // what keeps it from having to fire on every cold run.
+  await warmUp(cdp);
 
   let failures = 0;
 
@@ -323,46 +414,10 @@ async function main(): Promise<void> {
     });
 
     for (const scene of SCENES) {
-      // Clear the save on the no-boot page first, then load the real one. A
-      // scene that drives `buyAll()` writes that club to `localStorage` on
-      // `pagehide`, and the next scene would load it: the BARS scene silently
-      // became "everything already maxed", with no affordable row left to
-      // compare against. Same ordering as `screenshots.ts`, for the same reason.
-      await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
-      await sleep(400);
-      await cdp.evaluate(`localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)}); return true;`);
-
-      await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        await sleep(100);
-        const ready = await cdp
-          .evaluate<boolean>('return Boolean(window.__clubStore) && Boolean(window.__club);')
-          .catch(() => false);
-        if (ready) break;
-      }
-      await cdp.evaluate(`${scene.drive} return true;`);
-
-      // Wait for the row rather than for a fixed delay. `buyAll()` fires the ★
-      // celebration, and how long that takes to clear the sheet is not something
-      // to guess at: a 900 ms sleep measured the DOOR sheet correctly at
-      // 1440x900 and found nothing at all at 390x844.
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        await sleep(100);
-        const shown = await cdp
-          .evaluate<boolean>(
-            `const el = document.querySelector('.cta--maxed .cta__done');
-             return el !== null && el.getBoundingClientRect().width > 0;`,
-          )
-          .catch(() => false);
-        if (shown) break;
-      }
-      await sleep(300);
-
       console.log(
         `\n${viewport.name}  ${viewport.width}x${viewport.height} @${viewport.scale}x  —  ${scene.name}`,
       );
-
-      failures += await report(cdp, scene.probes);
+      failures += await measureScene(cdp, scene);
     }
   }
 
@@ -374,13 +429,35 @@ async function main(): Promise<void> {
   console.log('\nEvery probe clears its AA floor.');
 }
 
-/** Measure each probe on the page as it stands, and return the failure count. */
-async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
+/**
+ * Measure each probe on the page as it stands.
+ *
+ * Returns the report rather than printing it, so `measureScene` can throw the
+ * whole block away and drive the scene again if the page is replaced partway
+ * through. Half a block of numbers from a dead document is worse than none.
+ */
+async function report(
+  cdp: Cdp,
+  probes: readonly Probe[],
+  token: number,
+): Promise<{ failures: number; lines: string[] }> {
   let failures = 0;
+  const lines: string[] = [];
   for (const probe of probes) {
-    const after = await measure(cdp, probe.selector);
+    const after = await measure(cdp, probe.selector, token);
     if (after === null) {
-      console.log(`  ${probe.name.padEnd(18)} NOT FOUND (${probe.selector})`);
+      lines.push(`  ${probe.name.padEnd(18)} NOT FOUND (${probe.selector})`);
+      failures += 1;
+      continue;
+    }
+
+    if (after.textPixels === 0) {
+      // No colour in the patch cleared the coverage floor, so there is nothing
+      // to call the glyph. Reporting a ratio here would be inventing one.
+      lines.push(
+        `  ${probe.name.padEnd(18)} NO GLYPH over ${after.pixels} px ` +
+          `(all of it ${hex(after.surface)}) — ${probe.selector}`,
+      );
       failures += 1;
       continue;
     }
@@ -388,11 +465,14 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
     const ratio = contrast(after.text, after.surface);
     const verdict = ratio >= probe.floor ? 'PASS' : 'FAIL';
     if (ratio < probe.floor) failures += 1;
-    console.log(
+    lines.push(
       `  ${probe.name.padEnd(18)} ${ratio.toFixed(2).padStart(5)}:1  ` +
         `${hex(after.text)} on ${hex(after.surface)}  needs ${probe.floor.toFixed(1)}:1  ${verdict}`,
     );
-    console.log(`  ${''.padEnd(18)} ${probe.note}`);
+    lines.push(
+      `  ${''.padEnd(18)} glyph colour on ${after.textPixels} of ${after.pixels} sampled px`,
+    );
+    lines.push(`  ${''.padEnd(18)} ${probe.note}`);
 
     if (probe.withoutClass !== undefined) {
       // Measured before: strip the class on the live element and look again.
@@ -410,12 +490,13 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
           `.${probe.withoutClass} `,
           '.cta[aria-disabled="true"] ',
         );
-        const before = await measure(cdp, bare);
-        if (before !== null) {
-          console.log(
+        const before = await measure(cdp, bare, token);
+        if (before !== null && before.textPixels > 0) {
+          lines.push(
             `  ${''.padEnd(18)} before (no .${probe.withoutClass}): ` +
               `${contrast(before.text, before.surface).toFixed(2)}:1  ` +
-              `${hex(before.text)} on ${hex(before.surface)}`,
+              `${hex(before.text)} on ${hex(before.surface)}  ` +
+              `(${before.textPixels} of ${before.pixels} px)`,
           );
         }
         await cdp.evaluate(`
@@ -428,7 +509,7 @@ async function report(cdp: Cdp, probes: readonly Probe[]): Promise<number> {
       }
     }
   }
-  return failures;
+  return { failures, lines };
 }
 
 main().catch((error: unknown) => {

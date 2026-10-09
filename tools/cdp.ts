@@ -55,16 +55,22 @@ export class Cdp {
     return new Cdp(socket);
   }
 
-  send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  send<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = 30_000,
+  ): Promise<T> {
     const id = this.nextId++;
     this.socket.send(JSON.stringify({ id, method, params }));
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
       // CDP has no timeout of its own, and a hung call here would hang the
-      // whole script with no indication of which step stalled.
+      // whole script with no indication of which step stalled. Callers that
+      // mean to retry pass a shorter one: waiting the full 30 s before the
+      // first retry of a stalled `Page.captureScreenshot` is its own hang.
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
-      }, 30_000);
+      }, timeoutMs);
     });
   }
 
@@ -104,3 +110,83 @@ export async function pageTarget(debugUrl: string = CDP_URL): Promise<string> {
 
 export const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The sentinel `navigate` stamps on the outgoing document. */
+const NAV_AWAY = '__clubNavAway';
+
+/**
+ * Navigate, and do not return until the **new** document is the one answering.
+ *
+ * `Page.navigate` resolves when the navigation has been *started*, not when the
+ * old document has gone. Anything polled in the gap is answered by the page we
+ * are leaving, and a readiness predicate like `window.__club !== undefined` is
+ * perfectly happy to be satisfied by the previous scene's booted game. The
+ * driving script then runs against a document that is about to be destroyed,
+ * and the measurement that follows lands on a page that was never set up —
+ * which is how DUB-54's contrast run clipped the row below the badge and
+ * reported 1.00:1 on an 11.68:1 probe.
+ *
+ * So stamp the outgoing document first. A new document gets a new `window`,
+ * so the absence of the stamp is proof the swap has happened — no event
+ * subscription, no guessed sleep.
+ */
+export async function navigate(cdp: Cdp, url: string, timeoutMs = 15_000): Promise<void> {
+  // A fresh target has no document worth stamping yet; that is not an error.
+  const here = await cdp.evaluate<string | null>(`
+      window[${JSON.stringify(NAV_AWAY)}] = true;
+      return window.location.href;
+    `).catch(() => null);
+
+  // `Page.navigate` to the URL already loaded is a no-op in Chrome: no new
+  // document, so the barrier below would wait out its deadline on a page that
+  // was never going to be replaced. A reload always makes a new document.
+  if (here === url || here === `${url}/`) {
+    await cdp.send('Page.reload', { ignoreCache: false });
+  } else {
+    const result = await cdp.send<{ errorText?: string }>('Page.navigate', { url });
+    if (result.errorText !== undefined) {
+      throw new Error(`navigation to ${url} failed: ${result.errorText}`);
+    }
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // During the swap the execution context is gone and this throws. That is
+    // the barrier doing its job, so keep waiting rather than reporting ready.
+    const fresh = await cdp
+      .evaluate<boolean>(`return window[${JSON.stringify(NAV_AWAY)}] !== true;`)
+      .catch(() => false);
+    if (fresh) return;
+    await sleep(50);
+  }
+  throw new Error(`navigation to ${url} did not replace the document within ${timeoutMs} ms`);
+}
+
+/**
+ * Retry a CDP call that can stall rather than fail.
+ *
+ * `Page.captureScreenshot` on a page with a live WebGL canvas occasionally
+ * never answers: the compositor is waiting on a frame that the canvas has not
+ * produced. There is nothing to fix on our side and nothing wrong with the
+ * page — the next request goes through. Without this the whole run dies on one
+ * stalled frame, which is the second half of DUB-54.
+ */
+export async function retry<T>(
+  what: string,
+  attempt: () => Promise<T>,
+  attempts = 3,
+): Promise<T> {
+  let last: unknown;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      last = error;
+      if (i < attempts) {
+        console.warn(`  ${what} attempt ${i}/${attempts} failed (${String(error)}), retrying`);
+        await sleep(250 * i);
+      }
+    }
+  }
+  throw last instanceof Error ? last : new Error(`${what} failed: ${String(last)}`);
+}
