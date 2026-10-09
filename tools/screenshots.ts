@@ -1,5 +1,5 @@
 /**
- * Capture every one of the ten required states, at both review viewports.
+ * Capture every one of the required states, at the review viewports.
  *
  *   npm run shots                 # dev server must already be running
  *   CLUB_URL=http://host:5173 node tools/screenshots.ts
@@ -33,11 +33,62 @@ import { Cdp, pageTarget, sleep } from './cdp.ts';
 const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:5173';
 const OUT_DIR = process.env.CLUB_SHOTS ?? 'screenshots';
 
-/** The design viewport, and the desktop size that must not be *broken*. */
-const VIEWPORTS = [
+interface Viewport {
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  readonly scale: number;
+  readonly mobile: boolean;
+  /**
+   * The shape to seed, load and drive the state in, before turning to
+   * `width`x`height` for the capture.
+   *
+   * Only `landscape` needs this, and it needs it because of what landscape
+   * *is* in this game: `App.tsx` returns `RotatePrompt` above everything else,
+   * so at 844x390 there is no HUD, no bottom bar and no Settings sheet to
+   * reach into. A shot that depends on a setting has to set it in portrait
+   * first and then turn the phone — which is also the only order a player can
+   * do it in.
+   */
+  readonly reachedAt?: { readonly width: number; readonly height: number };
+}
+
+/**
+ * The design viewport, the desktop size that must not be *broken*, and a phone
+ * on its side.
+ *
+ * `landscape` is 390x844 turned, which is exactly the shape `ROTATE_QUERY`
+ * (`(min-aspect-ratio: 1/1) and (max-height: 599px)`) is written for — short
+ * and wide, where the portrait layout cannot be shown and the prompt is the
+ * only honest answer. It is deliberately **not** run against the full state
+ * list: every state renders the same rotate prompt there, so twenty identical
+ * screenshots would cost minutes and prove one thing. Shots opt in by name
+ * (see `Shot.viewports`), and only the two rotate-prompt shots do.
+ */
+const VIEWPORTS: readonly Viewport[] = [
   { name: 'mobile', width: 390, height: 844, scale: 2, mobile: true },
   { name: 'desktop', width: 1440, height: 900, scale: 1, mobile: false },
-] as const;
+  {
+    name: 'landscape',
+    width: 844,
+    height: 390,
+    scale: 2,
+    mobile: true,
+    reachedAt: { width: 390, height: 844 },
+  },
+];
+
+/** Where a shot is captured unless it says otherwise: the two review sizes. */
+const REVIEW_VIEWPORTS = ['mobile', 'desktop'] as const;
+
+/**
+ * How long to wait after turning the viewport, before capturing.
+ *
+ * `useLandscape` goes through a `matchMedia` change event into React state, so
+ * the prompt is a render behind the metrics override; and the glyph's own 2s
+ * loop needs a moment to be running rather than at its first frame.
+ */
+const TURN_SETTLE_MS = 700;
 
 // ---------------------------------------------------------------------------
 // The states
@@ -54,6 +105,24 @@ interface Shot {
   readonly reducedMotion?: boolean;
   /** Extra settle time, for states with an animation worth catching. */
   readonly settleMs?: number;
+  /**
+   * Which viewports this state is worth capturing at. Defaults to the two
+   * review sizes; `['landscape']` is the opt-in for a state that only exists
+   * with the phone on its side.
+   */
+  readonly viewports?: readonly string[];
+  /**
+   * Checked in the page immediately before the shutter, with the viewport
+   * already turned. Throws to fail the run; otherwise returns a short line
+   * that is logged beside the filename.
+   *
+   * Only worth it where the thing being photographed is hard to read *off* the
+   * photograph. A frozen glyph and a glyph caught at 0° on its way round look
+   * identical in a PNG, so `26-rotate-prompt-still` would pass silently if the
+   * fix regressed — the one shot whose whole job is to show the fix. Reading
+   * `animationPlayState` is what makes it a check rather than a picture.
+   */
+  readonly expect?: string;
 }
 
 const FRESH = `localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)});`;
@@ -96,6 +165,33 @@ const TAP_TOGGLE = `((label) => () => {
   );
   if (!toggle) throw new Error('no .toggle labelled ' + label);
   toggle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true }));
+})`;
+
+/**
+ * Read the rotate prompt's glyph — is it there, and is it moving?
+ *
+ * The angle comes out of the computed `transform` via `DOMMatrixReadOnly`
+ * rather than off the string, because a running animation reports an
+ * interpolated matrix and `rotate(0deg)` reports `none`. Both have to be
+ * comparable, since "upright" is the assertion.
+ *
+ * Interpolated into an `expect`, where it runs with the viewport already
+ * turned.
+ */
+const READ_GLYPH = `(() => {
+  const glyph = document.querySelector('.fatal__rotate-glyph');
+  if (!glyph) {
+    throw new Error('no rotate prompt at ' + window.innerWidth + 'x' + window.innerHeight);
+  }
+  const style = getComputedStyle(glyph);
+  const m = new DOMMatrixReadOnly(style.transform === 'none' ? 'matrix(1,0,0,1,0,0)' : style.transform);
+  return {
+    root: document.documentElement.className,
+    animation: style.animationName,
+    playState: style.animationPlayState,
+    degrees: Math.round((Math.atan2(m.b, m.a) * 180) / Math.PI),
+    viewport: window.innerWidth + 'x' + window.innerHeight,
+  };
 })`;
 
 /**
@@ -528,6 +624,70 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 1600,
   },
+  {
+    /*
+     * The screen that had never been photographed (DUB-89).
+     *
+     * Thirteen states times two viewports and `RotatePrompt` appeared in none
+     * of them, because both viewports were portrait-or-desktop and the prompt
+     * only exists below 600 px of height at an aspect ratio over 1. That is
+     * also why DUB-66 had to argue about `.fatal__rotate-glyph` by reading the
+     * stylesheet: there was nothing to look at.
+     *
+     * Default settings and no OS preference, so this is the glyph doing what it
+     * is supposed to do — `rotate-hint`, running. It is the baseline shot 26 is
+     * read against, and the only one of the pair that shows the animation the
+     * ticket is about.
+     */
+    name: '25-rotate-prompt',
+    note: 'rotate prompt at 844x390 — a 390x844 phone turned, default settings: glyph leaning and animating',
+    seed: FRESH,
+    viewports: ['landscape'],
+    settleMs: 400,
+    expect: `
+      const g = ${READ_GLYPH}();
+      if (g.animation !== 'rotate-hint') throw new Error('glyph is not animating: ' + g.animation);
+      if (g.playState !== 'running') throw new Error('glyph animation is ' + g.playState);
+      return 'glyph ' + g.animation + '/' + g.playState + ' at ' + g.degrees + 'deg, root "' + g.root + '", ' + g.viewport;
+    `,
+  },
+  {
+    /*
+     * The DUB-49 fix on the one screen where it matters most, made visible.
+     *
+     * A 2s infinite 90° loop on a screen with nothing to tap is the WCAG 2.2.2
+     * case in its purest form: the player cannot dismiss it, cannot play past
+     * it, and cannot stop it. `html.is-still` freezes it upright, and the copy
+     * carries the instruction on its own.
+     *
+     * Reached in the only order a player can reach it: the toggle tapped in
+     * Settings at 390x844, *then* the phone turned. The sheet does not exist at
+     * 844x390 — `App.tsx` returns the prompt above the whole HUD — so there is
+     * no turning first and tapping after. `reducedMotion` is left unemulated on
+     * purpose, for the same reason shot 23 leaves it: emulating the media query
+     * would answer for the toggle and prove nothing about it.
+     */
+    name: '26-rotate-prompt-still',
+    note: 'rotate prompt with reduced motion ON through the Settings toggle, OS preference unset — glyph frozen upright, the DUB-49 fix (DUB-89)',
+    seed: FRESH,
+    viewports: ['landscape'],
+    drive: `
+      window.__clubStore.getState().openSheet('settings');
+      setTimeout(${TAP_TOGGLE}('Reduced motion'), 300);
+    `,
+    settleMs: 900,
+    expect: `
+      const pref = window.__clubStore.getState().settings.reducedMotion;
+      if (pref !== 'on') throw new Error('the toggle did not land on; store says ' + pref);
+      const g = ${READ_GLYPH}();
+      if (!document.documentElement.classList.contains('is-still')) {
+        throw new Error('root is not is-still: "' + g.root + '"');
+      }
+      if (g.animation !== 'none') throw new Error('glyph is still animating: ' + g.animation);
+      if (g.degrees !== 0) throw new Error('glyph is not upright: ' + g.degrees + 'deg');
+      return 'glyph frozen upright (0deg, animation none), root "' + g.root + '", toggle ' + pref + ', ' + g.viewport;
+    `,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -537,7 +697,8 @@ const SHOTS: readonly Shot[] = [
 /**
  * Optional name filters from argv: `node tools/screenshots.ts 20-cta 21-cta`.
  *
- * The full set is two viewports of twenty-odd states and takes a few minutes.
+ * The full set is twenty-odd states at two viewports, plus the landscape pair,
+ * and takes a few minutes.
  * Re-capturing one pair after a one-line CSS change should not cost that, and
  * a reviewer comparing two shots wants them taken minutes apart, not runs
  * apart. No argument still means everything, so CI and `npm run shots` are
@@ -563,15 +724,26 @@ async function main(): Promise<void> {
 
   const manifest: { viewport: string; name: string; note: string; file: string }[] = [];
 
-  for (const viewport of VIEWPORTS) {
+  const setMetrics = async (viewport: Viewport, size: { width: number; height: number }): Promise<void> => {
     await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: viewport.width,
-      height: viewport.height,
+      width: size.width,
+      height: size.height,
       deviceScaleFactor: viewport.scale,
       mobile: viewport.mobile,
     });
+  };
 
-    for (const shot of shots) {
+  for (const viewport of VIEWPORTS) {
+    const here = shots.filter((shot) =>
+      (shot.viewports ?? REVIEW_VIEWPORTS).includes(viewport.name),
+    );
+    if (here.length === 0) continue;
+
+    for (const shot of here) {
+      // Seeding, loading and driving happen in `reachedAt` when the viewport
+      // has one, so the state is set in the shape the player can set it in.
+      await setMetrics(viewport, viewport.reachedAt ?? viewport);
+
       await cdp.send('Emulation.setEmulatedMedia', {
         features: [
           { name: 'prefers-reduced-motion', value: shot.reducedMotion === true ? 'reduce' : 'no-preference' },
@@ -608,6 +780,16 @@ async function main(): Promise<void> {
       if (shot.drive !== undefined) await cdp.evaluate(`${shot.drive} return true;`);
       await sleep(shot.settleMs ?? 400);
 
+      // Now turn the phone. After the drive, because the Settings sheet the
+      // drive reaches into is gone the moment the prompt takes the screen.
+      if (viewport.reachedAt !== undefined) {
+        await setMetrics(viewport, viewport);
+        await sleep(TURN_SETTLE_MS);
+      }
+
+      const confirmed =
+        shot.expect === undefined ? undefined : await cdp.evaluate<string>(shot.expect);
+
       const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
         format: 'png',
         captureBeyondViewport: false,
@@ -616,7 +798,10 @@ async function main(): Promise<void> {
       const file = `${viewport.name}-${shot.name}.png`;
       await writeFile(`${OUT_DIR}/${file}`, Buffer.from(data, 'base64'));
       manifest.push({ viewport: viewport.name, name: shot.name, note: shot.note, file });
-      console.log(`  ${viewport.name.padEnd(8)} ${shot.name.padEnd(22)} -> ${file}`);
+      console.log(
+        `  ${viewport.name.padEnd(9)} ${shot.name.padEnd(24)} -> ${file}` +
+          (confirmed === undefined ? '' : `\n              ${confirmed}`),
+      );
     }
   }
 
