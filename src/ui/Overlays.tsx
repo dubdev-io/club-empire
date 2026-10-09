@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { OFFLINE_CAP_SECONDS, STATION_DEFS } from '../config/economy.ts';
 import { useGameStore } from '../state/store.ts';
+import { activationProps } from './activation.ts';
 import { formatCash, formatCashExact, formatDuration, formatMinutes } from './format.ts';
 
 /**
@@ -13,6 +14,12 @@ import { formatCash, formatCashExact, formatDuration, formatMinutes } from './fo
  *
  * Tapping outside collects, exactly as tapping the button does. §9: never trap
  * the player in a modal they have to aim at.
+ *
+ * That promise was pointer-shaped and the keyboard was not covered by it. The
+ * scrim is `aria-hidden` and unreachable by design, this card is not in the
+ * overlay stack `App` closes on `Escape`, and [COLLECT] acted on `pointerdown`
+ * only — so a keyboard player returning to the game was held behind a card with
+ * no way past it (DUB-59).
  */
 export function OfflineCard(): React.JSX.Element | null {
   const show = useGameStore((s) => s.showOffline);
@@ -44,7 +51,19 @@ export function OfflineCard(): React.JSX.Element | null {
           </p>
         )}
 
-        <button type="button" className="cta cta--magenta cta--solo" onPointerDown={actions.collectOffline}>
+        {/*
+          No press callback, so this `.cta` gets only the `:active` half of the
+          DUB-38 rules — the half that can reach an iPhone as nothing at all.
+          That gap is the same defect DUB-38 fixed on `BuyButton` and is logged
+          against this card separately: closing it needs `ctaClassName` to learn
+          about `.cta--solo`, which is not a handler change and does not belong
+          in this sweep.
+        */}
+        <button
+          type="button"
+          className="cta cta--magenta cta--solo"
+          {...activationProps({ onAct: actions.collectOffline })}
+        >
           COLLECT
         </button>
       </div>
@@ -144,6 +163,11 @@ const CONFETTI = [
  * dead end** — the club keeps earning, the player is never locked out, and
  * [KEEP PLAYING] puts them straight back on the floor. There is no score to
  * beat and nothing to share, because there is nobody to share it with.
+ *
+ * [KEEP PLAYING] is also the only way off this screen — no `Escape` path, and
+ * the scrim is `aria-hidden` — so "never a dead end" was true by pointer and
+ * false by keyboard, and the screen congratulating the player on finishing the
+ * club was the one place they could not leave (DUB-59).
  */
 export function ClubComplete(): React.JSX.Element | null {
   const show = useGameStore((s) => s.showComplete);
@@ -192,7 +216,7 @@ export function ClubComplete(): React.JSX.Element | null {
         <button
           type="button"
           className="cta cta--magenta cta--solo"
-          onPointerDown={actions.acknowledgeComplete}
+          {...activationProps({ onAct: actions.acknowledgeComplete })}
         >
           KEEP PLAYING
         </button>
@@ -217,6 +241,12 @@ function Stat({ label, value }: { readonly label: string; readonly value: string
  * A save that fails to load and silently starts a fresh club is the single
  * worst bug this game could ship, because the player's only evidence is that
  * their club is gone.
+ *
+ * Both dismiss buttons acted on `pointerdown` alone, so by keyboard neither
+ * banner could be got rid of and both sat over the game for the rest of the
+ * session (DUB-59). They are also the two places where the double-activation
+ * guard in `activation.ts` earns its keep without any help from the UI: each
+ * writes a state change that should happen once.
  */
 export function Banners(): React.JSX.Element | null {
   const saveStatus = useGameStore((s) => s.saveStatus);
@@ -238,7 +268,7 @@ export function Banners(): React.JSX.Element | null {
           <button
             type="button"
             className="banner__action"
-            onPointerDown={() => dismissBanner('corrupt')}
+            {...activationProps({ onAct: () => dismissBanner('corrupt') })}
           >
             Start fresh
           </button>
@@ -252,7 +282,7 @@ export function Banners(): React.JSX.Element | null {
           <button
             type="button"
             className="banner__action"
-            onPointerDown={() => dismissBanner('storage')}
+            {...activationProps({ onAct: () => dismissBanner('storage') })}
             aria-label="Dismiss"
           >
             ✕

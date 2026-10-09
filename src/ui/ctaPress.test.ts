@@ -25,21 +25,28 @@
  * DUB-51 then added the other half of the same button: the press treatment
  * above is also what a *keypress* gets, and for a while that was all it got —
  * Enter and Space produced a convincing press and bought nothing, because the
- * purchase was on `pointerdown`. `buyActivation` is pure too, so which events
+ * purchase was on `pointerdown`. `activation` is pure too, so which events
  * transact is the third kind of fact here and the strongest: a real unit test
  * over a real sequence of events, including the sequences a browser only fires
  * when a key is held down.
+ *
+ * DUB-59 then found the same single handler on every other control in the app
+ * and made that module the shared one, so the sequences below are now every
+ * control's and not only the buy button's. The wiring of the other twelve, and
+ * the fact that each of them routes through here at all, is
+ * `activation.test.ts`; `onAct` is `onBuy` on this button and something else on
+ * the rest.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  buyActivation,
-  createBuyActivationLog,
+  activation,
+  createActivationLog,
   KEY_REPEAT_WINDOW_MS,
   POINTER_CLICK_WINDOW_MS,
   POINTER_DOWN_MAX_AGE_MS,
-} from './buyActivation.ts';
-import type { ActivationClock } from './buyActivation.ts';
+} from './activation.ts';
+import type { ActivationClock } from './activation.ts';
 import { ctaClassName } from './ctaClass.ts';
 
 const css = readFileSync(new URL('./ui.css', import.meta.url), 'utf8');
@@ -164,41 +171,42 @@ describe('BuyButton', () => {
     // The old code was `onPointerDown={inactive ? undefined : onBuy}`, so a
     // maxed or switched-off button had no handler and therefore no feedback.
     expect(sheet).not.toContain('onPointerDown={inactive ? undefined : onBuy}');
-    for (const handler of ['onPointerDown', 'onPointerUp', 'onPointerCancel', 'onPointerLeave']) {
-      expect(sheet).toContain(`${handler}=`);
-    }
+    // Unconditional *and* complete, which since DUB-59 is one fact rather than
+    // eight: the whole set arrives as a spread, so there is no per-handler
+    // assertion left to make here. Which eight they are is `activation.test.ts`.
+    expect(sheet).toContain('{...buy}');
   });
 
-  it('listens for the keyboard as well, which a pointer handler cannot hear', () => {
-    // DUB-51: Enter and Space produce a `click` and no `pointerdown` at all.
-    // The key events are what tell the click handler which click is coming.
-    for (const handler of ['onClick', 'onKeyDown', 'onKeyUp']) {
-      expect(sheet).toContain(`${handler}=`);
-    }
+  it('is the one control that drives a press class, so it is the one that passes `setPressed`', () => {
+    // The press half of the module is optional (DUB-59) because `.cta--pressed`
+    // exists for this button and there is no equivalent on a bottom-bar tab, a
+    // sheet's ✕, a banner dismiss or a settings toggle.
+    expect(sheet).toContain('activationProps({ inactive, onAct: onBuy, setPressed })');
   });
 
-  it('routes every one of them through the one module that decides', () => {
+  it('keeps its handlers out of the element, so none of them can be written inline', () => {
     // Not an aesthetic preference. A handler written inline here is a handler
-    // outside the sequence test below, and the whole defect was a sequence.
-    // Asserted per-name rather than as one source literal: the previous
-    // version pinned the whole call expression and broke on a reformat.
-    expect(sheet).toContain('buyActivation({');
-    for (const handler of ['pointerDown', 'pointerEnd', 'cancelPress', 'keyDown', 'keyUp', 'click']) {
-      expect(sheet).toContain(`activation.${handler}`);
+    // outside the sequence tests below, and the whole defect was a sequence.
+    const buyButton = sheet.slice(sheet.indexOf('export function BuyButton'));
+
+    for (const handler of ['onPointerDown=', 'onPointerUp=', 'onKeyDown=', 'onKeyUp=', 'onClick=']) {
+      expect(buyButton).not.toContain(handler);
     }
   });
 
   it('shares one activation log across buttons, because a purchase remounts one', () => {
     // R3 from the DUB-57 review. Buying `Unlock` in `BarsSheet` replaces the
     // pressed button with two new ones, so suppression held in a `useRef` is
-    // reset while the compatibility click is still in flight.
-    expect(sheet).toContain('buyActivationLog');
-    expect(sheet).not.toContain('useRef(false)');
+    // reset while the compatibility click is still in flight. DUB-59 moved the
+    // default into `activationProps`, so what this pins is that no call site
+    // re-introduces per-instance state. `useRef` survives in the comment that
+    // explains why, hence the open paren.
+    expect(sheet).not.toContain('useRef(');
   });
 });
 
 /**
- * The purchase itself: exactly one `onBuy` per activation, by every route.
+ * The action itself: exactly one `onAct` per activation, by every route.
  *
  * The halves pull in opposite directions and that is the whole difficulty.
  * Touch must transact on `pointerdown` or it feels dead (DUB-38), the keyboard
@@ -210,7 +218,7 @@ describe('BuyButton', () => {
  * clock advanced by hand, because the only thing being tested is order and
  * timing. The four regressions named R1-R4 are the DUB-57 review's.
  */
-describe('buyActivation', () => {
+describe('activation', () => {
   /** A clock the test steps, standing in for `performance.now()`. */
   function stopwatch(): ActivationClock & { advance: (ms: number) => void } {
     let t = 1_000;
@@ -225,18 +233,18 @@ describe('buyActivation', () => {
    */
   function button({
     inactive = false,
-    log = createBuyActivationLog(),
+    log = createActivationLog(),
     clock = stopwatch(),
   } = {}) {
-    const onBuy = vi.fn();
+    const onAct = vi.fn();
     const setPressed = vi.fn();
 
     return {
-      onBuy,
+      onAct,
       setPressed,
       log,
       clock,
-      handlers: buyActivation({ log, clock, inactive, onBuy, setPressed }),
+      handlers: activation({ log, clock, inactive, onAct, setPressed }),
     };
   }
 
@@ -304,23 +312,23 @@ describe('buyActivation', () => {
     b.handlers.pointerDown({ pointerId: MOUSE });
     // The purchase is already made here — before `pointerup`, let alone before
     // the ~300 ms `click`. That is criterion 2's 100 ms budget.
-    expect(b.onBuy).toHaveBeenCalledTimes(1);
+    expect(b.onAct).toHaveBeenCalledTimes(1);
 
     b.clock.advance(80);
     b.handlers.pointerEnd({ pointerId: MOUSE });
     b.clock.advance(300);
     b.handlers.click({ detail: 1 });
-    expect(b.onBuy).toHaveBeenCalledTimes(1);
+    expect(b.onAct).toHaveBeenCalledTimes(1);
   });
 
   it('buys once on Enter, and once on Space', () => {
     const enter = button();
     pressEnter(enter);
-    expect(enter.onBuy).toHaveBeenCalledTimes(1);
+    expect(enter.onAct).toHaveBeenCalledTimes(1);
 
     const space = button();
     pressSpace(space);
-    expect(space.onBuy).toHaveBeenCalledTimes(1);
+    expect(space.onAct).toHaveBeenCalledTimes(1);
   });
 
   it('does not double-buy a tap whose click claims not to come from a pointer', () => {
@@ -332,7 +340,7 @@ describe('buyActivation', () => {
 
     tap(b, { detail: 0 });
 
-    expect(b.onBuy).toHaveBeenCalledTimes(1);
+    expect(b.onAct).toHaveBeenCalledTimes(1);
   });
 
   it('charges two taps in a row twice, and no more', () => {
@@ -341,7 +349,7 @@ describe('buyActivation', () => {
     tap(b);
     tap(b);
 
-    expect(b.onBuy).toHaveBeenCalledTimes(2);
+    expect(b.onAct).toHaveBeenCalledTimes(2);
   });
 
   it('does not double-buy a long press, whose click lands a second after the finger', () => {
@@ -352,7 +360,7 @@ describe('buyActivation', () => {
 
     tap(b, { detail: 0, holdMs: 3_000 });
 
-    expect(b.onBuy).toHaveBeenCalledTimes(1);
+    expect(b.onAct).toHaveBeenCalledTimes(1);
   });
 
   describe('a held key (R1)', () => {
@@ -365,7 +373,7 @@ describe('buyActivation', () => {
 
       pressEnter(b, { repeats: 20 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(1);
+      expect(b.onAct).toHaveBeenCalledTimes(1);
     });
 
     it('buys once on a held Space, on the way up', () => {
@@ -376,7 +384,7 @@ describe('buyActivation', () => {
 
       pressSpace(b, { repeats: 20 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(1);
+      expect(b.onAct).toHaveBeenCalledTimes(1);
     });
 
     it('still buys on the next press after a held one', () => {
@@ -386,7 +394,7 @@ describe('buyActivation', () => {
       pressEnter(b);
       pressSpace(b, { repeats: 5 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(3);
+      expect(b.onAct).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -407,7 +415,7 @@ describe('buyActivation', () => {
     b.clock.advance(300);
     b.handlers.click({ detail: 0 });
 
-    expect(b.onBuy).toHaveBeenCalledTimes(1);
+    expect(b.onAct).toHaveBeenCalledTimes(1);
   });
 
   it('suppresses the compatibility click even when the purchase remounted the button (R3)', () => {
@@ -418,15 +426,15 @@ describe('buyActivation', () => {
     // not. Note the click is `detail: 0` — on an engine that reports it
     // honestly `detail` would catch this, and this is the case where it is the
     // shared log or nothing.
-    const log = createBuyActivationLog();
+    const log = createActivationLog();
     const clock = stopwatch();
-    const onBuy = vi.fn();
+    const onAct = vi.fn();
 
-    const first = buyActivation({
+    const first = activation({
       log,
       clock,
       inactive: false,
-      onBuy,
+      onAct,
       setPressed: vi.fn(),
     });
     first.pointerDown({ pointerId: FINGER_1 });
@@ -434,17 +442,17 @@ describe('buyActivation', () => {
     first.pointerEnd({ pointerId: FINGER_1 });
 
     // The re-render that the purchase caused: a new button, a new instance.
-    const second = buyActivation({
+    const second = activation({
       log,
       clock,
       inactive: false,
-      onBuy,
+      onAct,
       setPressed: vi.fn(),
     });
     clock.advance(300);
     second.click({ detail: 0 });
 
-    expect(onBuy).toHaveBeenCalledTimes(1);
+    expect(onAct).toHaveBeenCalledTimes(1);
   });
 
   describe('a pointer activation that never produces a click (R4)', () => {
@@ -459,12 +467,12 @@ describe('buyActivation', () => {
 
       b.handlers.pointerDown({ pointerId: MOUSE });
       b.handlers.pointerEnd({ pointerId: MOUSE }); // `pointercancel`: the scroll took it.
-      expect(b.onBuy).toHaveBeenCalledTimes(1);
+      expect(b.onAct).toHaveBeenCalledTimes(1);
 
       b.clock.advance(POINTER_CLICK_WINDOW_MS);
       b.handlers.click({ detail: 0 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(2);
+      expect(b.onAct).toHaveBeenCalledTimes(2);
     });
 
     it('still suppresses a click that arrives inside the window', () => {
@@ -477,7 +485,7 @@ describe('buyActivation', () => {
       b.clock.advance(POINTER_CLICK_WINDOW_MS - 1);
       b.handlers.click({ detail: 0 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(1);
+      expect(b.onAct).toHaveBeenCalledTimes(1);
     });
 
     it('lets the keyboard through immediately, without waiting for the window', () => {
@@ -490,7 +498,7 @@ describe('buyActivation', () => {
       b.handlers.pointerEnd({ pointerId: MOUSE });
       pressEnter(b);
 
-      expect(b.onBuy).toHaveBeenCalledTimes(2);
+      expect(b.onAct).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -517,12 +525,12 @@ describe('buyActivation', () => {
       const b = button();
 
       holdThenLoseFocus(b, 'Enter');
-      expect(b.onBuy).toHaveBeenCalledTimes(1);
+      expect(b.onAct).toHaveBeenCalledTimes(1);
 
       b.handlers.cancelPress(); // `blur`: the `keyup` will land elsewhere.
       b.handlers.click({ detail: 0 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(2);
+      expect(b.onAct).toHaveBeenCalledTimes(2);
     });
 
     it('expires on its own when neither the `keyup` nor the blur arrives', () => {
@@ -535,7 +543,7 @@ describe('buyActivation', () => {
       b.clock.advance(KEY_REPEAT_WINDOW_MS);
       b.handlers.click({ detail: 0 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(1);
+      expect(b.onAct).toHaveBeenCalledTimes(1);
     });
 
     it('still suppresses a repeat click inside the window', () => {
@@ -548,7 +556,7 @@ describe('buyActivation', () => {
       b.clock.advance(KEY_REPEAT_WINDOW_MS - 1);
       b.handlers.click({ detail: 0 });
 
-      expect(b.onBuy).not.toHaveBeenCalled();
+      expect(b.onAct).not.toHaveBeenCalled();
     });
 
     it('keeps the `keyup` clear, which no window could replace', () => {
@@ -559,14 +567,14 @@ describe('buyActivation', () => {
 
       pressSpace(b, { repeats: 20 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(1);
+      expect(b.onAct).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('two fingers on two buy buttons (R6)', () => {
     /** `Upgrade` and `+ Lane`, side by side in one `station-row__buys`. */
     function pair() {
-      const log = createBuyActivationLog();
+      const log = createActivationLog();
       const clock = stopwatch();
 
       return {
@@ -588,8 +596,8 @@ describe('buyActivation', () => {
       upgrade.handlers.pointerDown({ pointerId: FINGER_1 });
       clock.advance(50);
       lane.handlers.pointerDown({ pointerId: FINGER_2 });
-      expect(upgrade.onBuy).toHaveBeenCalledTimes(1);
-      expect(lane.onBuy).toHaveBeenCalledTimes(1);
+      expect(upgrade.onAct).toHaveBeenCalledTimes(1);
+      expect(lane.onAct).toHaveBeenCalledTimes(1);
 
       clock.advance(50);
       upgrade.handlers.pointerEnd({ pointerId: FINGER_1 });
@@ -602,8 +610,8 @@ describe('buyActivation', () => {
       clock.advance(300);
       lane.handlers.click({ detail: 0 });
 
-      expect(upgrade.onBuy).toHaveBeenCalledTimes(1);
-      expect(lane.onBuy).toHaveBeenCalledTimes(1);
+      expect(upgrade.onAct).toHaveBeenCalledTimes(1);
+      expect(lane.onAct).toHaveBeenCalledTimes(1);
     });
 
     it('does not let the release of one finger suppress a fresh tap by the other', () => {
@@ -615,8 +623,8 @@ describe('buyActivation', () => {
       clock.advance(1_200);
       tap(lane, { pointerId: FINGER_2 });
 
-      expect(upgrade.onBuy).toHaveBeenCalledTimes(1);
-      expect(lane.onBuy).toHaveBeenCalledTimes(1);
+      expect(upgrade.onAct).toHaveBeenCalledTimes(1);
+      expect(lane.onAct).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -636,7 +644,7 @@ describe('buyActivation', () => {
       b.handlers.pointerEnd({ pointerId: MOUSE });
       b.handlers.click({ detail: 0 });
 
-      expect(b.onBuy).toHaveBeenCalledTimes(2);
+      expect(b.onAct).toHaveBeenCalledTimes(2);
     });
 
     it('leaves the press class alone, which may belong to a key (N2)', () => {
@@ -657,16 +665,16 @@ describe('buyActivation', () => {
     const b = button();
 
     // A stray mouse click with no `pointerdown` of ours behind it: not ours.
-    // This is also the accepted residual in `buyActivation.ts` — voice control
+    // This is also the accepted residual in `activation.ts` — voice control
     // and some switch-access software dispatch a real `MouseEvent`, and this
     // button will not answer it.
     b.handlers.click({ detail: 1 });
-    expect(b.onBuy).not.toHaveBeenCalled();
+    expect(b.onAct).not.toHaveBeenCalled();
 
     // `element.click()`, and an assistive technology's activation: detail 0,
     // no pointer sequence. That is a real activation and it buys.
     b.handlers.click({ detail: 0 });
-    expect(b.onBuy).toHaveBeenCalledTimes(1);
+    expect(b.onAct).toHaveBeenCalledTimes(1);
   });
 
   it('never buys on a key event itself, whichever key and however many', () => {
@@ -678,7 +686,7 @@ describe('buyActivation', () => {
       b.handlers.keyUp({ key, repeat: false });
     }
 
-    expect(b.onBuy).not.toHaveBeenCalled();
+    expect(b.onAct).not.toHaveBeenCalled();
   });
 
   describe('a button whose press buys nothing — unaffordable, maxed, switched off', () => {
@@ -686,7 +694,7 @@ describe('buyActivation', () => {
       const tapped = button({ inactive: true });
       tap(tapped);
 
-      expect(tapped.onBuy).not.toHaveBeenCalled();
+      expect(tapped.onAct).not.toHaveBeenCalled();
       // The press treatment is the whole of DUB-38's answer to a dead-end tap.
       expect(tapped.setPressed).toHaveBeenCalledWith(true);
 
@@ -698,14 +706,14 @@ describe('buyActivation', () => {
       const keyed = button({ inactive: true });
       pressEnter(keyed);
 
-      expect(keyed.onBuy).not.toHaveBeenCalled();
+      expect(keyed.onAct).not.toHaveBeenCalled();
       expect(keyed.setPressed).toHaveBeenCalledWith(true);
       expect(keyed.setPressed).toHaveBeenLastCalledWith(false);
 
       const spaced = button({ inactive: true });
       pressSpace(spaced);
 
-      expect(spaced.onBuy).not.toHaveBeenCalled();
+      expect(spaced.onAct).not.toHaveBeenCalled();
       expect(spaced.setPressed).toHaveBeenCalledWith(true);
     });
 
@@ -714,20 +722,20 @@ describe('buyActivation', () => {
       // the click arrives — a price that just dropped, or a tick of income
       // between the two events. The click must not transact: the player pressed
       // a button that could not be bought, and nothing has been pressed since.
-      const log = createBuyActivationLog();
+      const log = createActivationLog();
       const clock = stopwatch();
-      const onBuy = vi.fn();
+      const onAct = vi.fn();
 
-      buyActivation({ log, clock, inactive: true, onBuy, setPressed: vi.fn() }).pointerDown({
+      activation({ log, clock, inactive: true, onAct, setPressed: vi.fn() }).pointerDown({
         pointerId: MOUSE,
       });
       clock.advance(380);
       // The re-render. Same log, same element, `inactive` now false.
-      buyActivation({ log, clock, inactive: false, onBuy, setPressed: vi.fn() }).click({
+      activation({ log, clock, inactive: false, onAct, setPressed: vi.fn() }).click({
         detail: 0,
       });
 
-      expect(onBuy).not.toHaveBeenCalled();
+      expect(onAct).not.toHaveBeenCalled();
     });
   });
 });

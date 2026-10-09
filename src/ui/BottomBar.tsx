@@ -1,5 +1,6 @@
 import { QUEUE_WARNING_SHARE } from '../config/economy.ts';
 import { useGameStore } from '../state/store.ts';
+import { activationProps } from './activation.ts';
 
 /**
  * The only navigation in the game: two panels and settings.
@@ -9,6 +10,18 @@ import { useGameStore } from '../state/store.ts';
  * a menu — `⚠` on DOOR when guests are being turned away, and a dot on BARS
  * when something in there is affordable — so the player is told where to look
  * without opening anything.
+ *
+ * It is also the only way into any of the three panels, which made DUB-59's bug
+ * worst here: these three opened on `pointerdown` alone, and keyboard
+ * activation of a `<button>` produces a `click` and no `pointerdown`, so a
+ * player on a keyboard could tab onto all three tabs and open none of them. Not
+ * a degraded game — no game, because everything the player can buy is behind
+ * one of these.
+ *
+ * `activationProps` is the shared fix, and no tab passes a press callback:
+ * `.bar-button:active` already swaps the tab's background against a container
+ * it does not match, so unlike `.cta` there is nothing for a class of our own
+ * to rescue.
  */
 export function BottomBar(): React.JSX.Element {
   const openSheet = useGameStore((s) => s.openSheet);
@@ -32,7 +45,7 @@ export function BottomBar(): React.JSX.Element {
       <button
         type="button"
         className={`bar-button${sheet === 'bars' ? ' bar-button--active' : ''}`}
-        onPointerDown={() => openSheet('bars')}
+        {...activationProps({ onAct: () => openSheet('bars') })}
       >
         <span>BARS</span>
         {barsAffordable && <span className="bar-button__dot" aria-label="upgrade available" />}
@@ -41,7 +54,7 @@ export function BottomBar(): React.JSX.Element {
       <button
         type="button"
         className={`bar-button${sheet === 'door' ? ' bar-button--active' : ''}`}
-        onPointerDown={() => openSheet('door')}
+        {...activationProps({ onAct: () => openSheet('door') })}
       >
         <span>DOOR</span>
         {arrivals > 0 && turnedAway / arrivals >= QUEUE_WARNING_SHARE ? (
@@ -57,7 +70,7 @@ export function BottomBar(): React.JSX.Element {
       <button
         type="button"
         className={`bar-button bar-button--icon${sheet === 'settings' ? ' bar-button--active' : ''}`}
-        onPointerDown={() => openSheet('settings')}
+        {...activationProps({ onAct: () => openSheet('settings') })}
         aria-label="Settings"
       >
         <span aria-hidden="true">⚙</span>
