@@ -43,6 +43,16 @@ export interface GeneratedTextures {
   readonly ring: Texture;
   /** Five-pointed star, 32px. ★ pips and the celebration burst. */
   readonly star: Texture;
+  /**
+   * The same star as an outline, 32px. The *unearned* ★ pip.
+   *
+   * A pip separated from an earned one by tint alone is colour-alone signalling,
+   * which §9 forbids, and the `GOLD_VIP` / `INK_DISABLED` pair is 2.12:1 — under
+   * the 3:1 non-text minimum. Hollow-vs-filled carries the same fact in shape,
+   * so it survives greyscale and a colour-blind eye. The tints stay; they are
+   * now the second signal rather than the only one.
+   */
+  readonly starOutline: Texture;
   /** Tall thin bottle, 10x28. Back-bar stock — what makes a station's level visible on the floor. */
   readonly bottle: Texture;
   /** Rounded speech-bubble-ish coin body, 44px. The cash bubble. */
@@ -100,11 +110,35 @@ export function createTextures(renderer: Renderer): GeneratedTextures {
   // smaller one punched out would need a mask and a second draw call.
   const ring = bake((g) => g.circle(24, 24, 20).stroke({ width: 4, color: 0xffffff }));
 
-  const star = bake((g) => {
+  // Both stars trace the identical path, so the filled and hollow pips cannot
+  // drift apart as the silhouette is tuned.
+  const starPath = (g: Graphics): Graphics => {
     g.moveTo(...starPoint(0));
     for (let i = 1; i < 10; i += 1) g.lineTo(...starPoint(i));
-    g.closePath().fill(0xffffff);
-  });
+    return g.closePath();
+  };
+
+  const star = bake((g) => starPath(g).fill(0xffffff));
+
+  // `alignment: 1` is Pixi's *inside* stroke, and it is load-bearing. A centred
+  // stroke would hang 2 px outside the path, which widens the generated bounds
+  // — and `generateTexture` bakes the bounds, so the hollow star would come out
+  // in a ~34 px box against the filled one's ~30 px and render about 12%
+  // smaller at the same `setSize`. Inside alignment keeps the box and the outer
+  // edge exactly the filled star's.
+  //
+  // Width is 2, not the 4 the asset spec named, and that is the one place this
+  // departs from it. A star is mostly edge: the body inside the waist is only
+  // ~13 units across, so a 4-unit stroke taken entirely inwards closes to
+  // within ~4.6 units of itself and the ☆ bakes as a nearly solid star with a
+  // notch in it. Measured at 390x844: 18.0% ink against the filled pip's 22.6%,
+  // where a hollow star should be a fraction of it. The spec's worry was the
+  // opposite — a stroke too thin to see — but that was reckoned in CSS px; at
+  // DPR 2 a 2-unit stroke is still ~2 device px, which is why halving it costs
+  // nothing and buys back the interior.
+  const starOutline = bake((g) =>
+    starPath(g).stroke({ width: 2, color: 0xffffff, alignment: 1 }),
+  );
 
   // A bottle is a body plus a neck. Enough silhouette to read at 28 px, which
   // is the size it is actually drawn at.
@@ -145,6 +179,7 @@ export function createTextures(renderer: Renderer): GeneratedTextures {
     capsule,
     ring,
     star,
+    starOutline,
     bottle,
     coin,
     dash,
