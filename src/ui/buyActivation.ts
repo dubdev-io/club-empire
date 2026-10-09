@@ -88,28 +88,47 @@ export const POINTER_CLICK_WINDOW_MS = 1000;
  * last repeat, so any duration long enough to cover Enter's repeat clicks would
  * also swallow Space's real one. The stamp earns its keep in the case where
  * neither clearing event comes — focus taken mid-hold by a React unmount, which
- * fires no `blur` — and it needs to outlast only the gap between two repeats.
- * The slowest rate a platform offers is about 2 Hz (macOS) or 2.5 Hz (Windows),
- * so the gap to cover is ~500 ms and this is double it.
+ * fires no `blur`.
+ *
+ * **It does not have to span the gap between two repeats**, which is what an
+ * earlier version of this comment claimed and got wrong twice over (N4). Every
+ * repeat `keydown` re-stamps `keyRepeatingAt`, and the `click` that repeat
+ * synthesises follows its own `keydown` immediately — so the age this guard
+ * ever sees is one event dispatch, not one repeat interval, and the repeat rate
+ * is irrelevant at any value. (The figure quoted for it was wrong as well:
+ * macOS's slowest setting is ~0.5 Hz, not ~2 Hz.)
+ *
+ * So the floor here is a single dispatch, and the length buys only one thing: a
+ * longer veto on synthetic activations after a hold that got neither clear.
+ * That is the residual the stamp exists to bound, so the number wants to be
+ * *small* enough not to strand a screen reader and large enough to be obviously
+ * safe. A second is a generous, harmless margin — read it as a bound on the
+ * residual, not as a rate to be raised if a slow keyboard turns up.
  */
 export const KEY_REPEAT_WINDOW_MS = 1000;
 
 /**
- * How old a `pointerdown` of ours may be and still have its release refresh the
- * window (N1).
+ * How old an entry in `downPointers` may be: beyond this it is pruned on the
+ * next `pointerdown`, and it cannot refresh the window (N1, R7).
  *
- * A pointer whose release never reaches a handler leaves its entry in
- * `downPointers` — a purchase can tear the capture target down mid-press. A
- * touch id never recurs, so a stale touch entry is inert, but the mouse's
- * `pointerId` is stable: without a cap, a cursor merely crossing any buy button
- * minutes later would find the stale entry, pass the gate and open a window no
- * press opened, which is the one thing the gate exists to prevent.
+ * A pointer whose release never reaches a handler leaves its entry behind — a
+ * purchase can tear the capture target down mid-press. A touch id never
+ * recurs, so a stale touch entry is inert, but the mouse's `pointerId` is
+ * stable, so a stale mouse entry makes a later genuine release at that id look
+ * like the release of a press this log never saw.
  *
- * Long rather than tight, because the two errors are not equal: too long only
- * narrows N1, while too short refuses to refresh a genuine slow release and
- * puts its compatibility click back on `detail` alone. Thirty seconds is beyond
- * any press a player makes on purpose and well under the age of the stale
- * entries this is here for.
+ * This age was briefly the *only* thing between a passing cursor and the
+ * window, and it was no good at it: the sequence that leaves an entry behind is
+ * a purchase unmounting its own button, and the cursor crosses a buy button
+ * seconds later, not minutes, so everything that mattered passed the gate
+ * (R7). What closes that is `released` below — a `pointerleave` never refreshes
+ * at any age. This is now defence in depth plus the bound on the map, which is
+ * the right job for a number nobody can derive.
+ *
+ * Long rather than tight, because in *that* job the two errors are not equal:
+ * too long only narrows the backstop, while too short refuses to refresh a
+ * genuine slow release and puts its compatibility click back on `detail` alone.
+ * Thirty seconds is beyond any press a player makes on purpose.
  */
 export const POINTER_DOWN_MAX_AGE_MS = 30_000;
 
@@ -164,10 +183,17 @@ export interface BuyActivationLog {
    * touch engine that this module is written not to bet money on.
    *
    * Its presence is also the gate on refreshing the window, which is why the
-   * entry is needed at all rather than just a count: on a desktop
-   * `pointerleave` fires whenever the mouse crosses the button, pressed or not,
-   * and a window reopened by a passing cursor would swallow a synthetic
-   * activation for a second at a time.
+   * entry is needed at all rather than just a count: a mouse pressed somewhere
+   * else and released over a buy button fires a `pointerup` here with no
+   * `pointerdown` behind it, and that gesture produces no click on this button
+   * for a refreshed window to suppress — only a window that could swallow the
+   * next synthetic activation.
+   *
+   * Entries older than `POINTER_DOWN_MAX_AGE_MS` are dropped on the next
+   * `pointerdown`. Without that this is the one piece of state in the module
+   * with no way to expire: entries leave only through a release, and a press
+   * that unmounts its own button never delivers one, so a long session would
+   * accumulate them without bound (R7).
    */
   downPointers: Map<number, number>;
   /**
@@ -238,12 +264,33 @@ export interface BuyActivationInput {
   readonly onBuy: () => void;
   /** Drives `.cta--pressed`. */
   readonly setPressed: (pressed: boolean) => void;
+  /**
+   * The pointers currently pressing *this* button — one `Set` per mounted
+   * button, held in a `useRef`, and the one piece of state here that is
+   * deliberately **not** shared.
+   *
+   * The suppression log above is module-level because a purchase remounts its
+   * own row and the click still has to be suppressed at whatever button is
+   * under the finger by then (R3). The press *class* is the opposite kind of
+   * fact: it belongs to one element, so the state that governs it has to as
+   * well. Sharing it is what let a `pointerleave` on button B clear a class
+   * that a stale entry from button A had vouched for, dropping `.cta--pressed`
+   * out from under a key that was still held (R7, symptom 2).
+   *
+   * A remount resets this, which is correct here and only here: a freshly
+   * mounted button has no class to clear either.
+   */
+  readonly pressedBy: Set<number>;
 }
 
 export interface BuyActivationHandlers {
   readonly pointerDown: (event: ActivationPointer) => void;
-  /** `pointerup`, `pointercancel`, `pointerleave`. */
-  readonly pointerEnd: (event: ActivationPointer) => void;
+  /**
+   * `pointerup` and `pointercancel` (`released: true`), and `pointerleave`
+   * (`released: false`). See the handler — the two are not the same event and
+   * treating them alike is R7.
+   */
+  readonly pointerEnd: (event: ActivationPointer, released: boolean) => void;
   readonly keyDown: (event: ActivationKey) => void;
   readonly keyUp: (event: ActivationKey) => void;
   readonly click: (event: ActivationClick) => void;
@@ -257,48 +304,88 @@ export function buyActivation({
   inactive,
   onBuy,
   setPressed,
+  pressedBy,
 }: BuyActivationInput): BuyActivationHandlers {
   return {
     pointerDown: (event) => {
+      // One reading, so the two stamps below are provably the same instant
+      // rather than a hair apart (N6).
+      const now = clock.now();
+
       // Unconditionally, and before the purchase: the tap that buys nothing is
       // exactly the one DUB-38 found this button swallowing.
       setPressed(true);
+
+      // The prune. An entry only leaves through a release, and a press that
+      // unmounts its own button never delivers one, so this is the only thing
+      // bounding the map — and it keeps `POINTER_DOWN_MAX_AGE_MS` as a backstop
+      // rather than the last line of defence (R7). Deleting during iteration is
+      // defined for a `Map`.
+      for (const [pointerId, downAt] of log.downPointers) {
+        if (now - downAt >= POINTER_DOWN_MAX_AGE_MS) log.downPointers.delete(pointerId);
+      }
+
       // Stamped even on an inactive button. The compatibility `click` comes
       // either way, and by then the button may be affordable — the purchase
       // this event could not make is not one the click should make for it.
-      log.pointerServedAt = clock.now();
-      log.downPointers.set(event.pointerId, clock.now());
+      log.pointerServedAt = now;
+      log.downPointers.set(event.pointerId, now);
+      pressedBy.add(event.pointerId);
       if (!inactive) onBuy();
     },
 
     /*
-     * The way up: the press treatment ends, and the window is *refreshed*
-     * rather than cleared.
+     * The way up: the press treatment ends, and on a *release* the window is
+     * refreshed rather than cleared.
      *
-     * Clearing here would be the obvious thing and is wrong. With implicit
-     * touch capture the pointer ceases to exist on release, so `pointerup` and
-     * the `pointerleave` fired for it both land before the compatibility click
-     * — clearing would leave `detail` alone against exactly the input it is
+     * Clearing would be the obvious thing and is wrong. With implicit touch
+     * capture the pointer ceases to exist on release, so `pointerup` and the
+     * `pointerleave` fired for it both land before the compatibility click —
+     * clearing would leave `detail` alone against exactly the input it is
      * least sure about. Refreshing is also what holds a long press to one
      * purchase: held for three seconds, its click is 3.3 s after the
      * `pointerdown` and outside any window measured from that.
      *
-     * Per pointer, so that a second finger's release refreshes the window its
-     * own click will be measured against and not the first finger's (R6). A
-     * pointer with no entry is one whose `pointerdown` this log never saw — a
-     * cursor crossing the button — and it changes nothing, including the press
-     * class, which may belong to a key currently held (N2).
+     * `released` is the whole of R7. This runs for three events and only two
+     * of them are a release: `pointerleave` fires whenever a cursor crosses
+     * the button, pressed or not. Reading an entry as proof of a press cannot
+     * tell those apart once one entry is left behind — the mouse's `pointerId`
+     * is stable — and a hover that found a stale entry re-opened a full window
+     * over a genuine keypress, swallowing it. An age cap does not help: a
+     * stale entry is at its most dangerous when it is seconds old, because the
+     * sequence that leaves one is a purchase unmounting its own button.
+     *
+     * So a leave drops the entry and refreshes nothing. That costs nothing on
+     * either path that matters: touch's `pointerup` always arrives at the
+     * pressed button under implicit capture and refreshes there, which makes
+     * the leave behind it redundant, and a mouse dragged off before release
+     * produces no `click` on this button at all. The one case it gives up is a
+     * cursor that leaves a pressed button and comes back before releasing,
+     * whose click then rests on `detail` alone — and that is the mouse, where
+     * `detail` is the one engine's report this module does trust.
+     *
+     * Per pointer throughout, so a second finger's release refreshes the
+     * window its own click is measured against and not the first finger's
+     * (R6).
      */
-    pointerEnd: (event) => {
+    pointerEnd: (event, released) => {
+      // Per instance, not from the shared log: the class belongs to this
+      // element, so only a pointer that pressed *this* button may clear it.
+      // A key may be holding it down (N2), and the stale entry that made the
+      // shared map lie about that is R7.
+      const wasPressingThis = pressedBy.delete(event.pointerId);
+
       const downAt = log.downPointers.get(event.pointerId);
-      if (downAt === undefined) return;
-      log.downPointers.delete(event.pointerId);
-      // An entry older than any real press is one whose release never reached
-      // a handler, left behind by a purchase tearing its own button down. There
-      // is no click coming for it, and refreshing on a stale one is how a
-      // passing cursor would open a window no press opened (N1).
-      if (clock.now() - downAt < POINTER_DOWN_MAX_AGE_MS) log.pointerServedAt = clock.now();
-      setPressed(false);
+      if (downAt !== undefined) {
+        log.downPointers.delete(event.pointerId);
+        // The age cap is now a backstop behind `released` rather than the
+        // gate itself, and the prune in `pointerDown` keeps the map bounded.
+        if (released && clock.now() - downAt < POINTER_DOWN_MAX_AGE_MS) {
+          log.pointerServedAt = clock.now();
+        }
+      }
+
+      if (wasPressingThis) setPressed(false);
     },
 
     /*

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { buyActivation, buyActivationLog, performanceClock } from './buyActivation.ts';
 import { ctaClassName } from './ctaClass.ts';
@@ -129,20 +129,32 @@ export function BuyButton({
   const [pressed, setPressed] = useState(false);
 
   /*
-   * Which events may buy.
+   * Which events may buy, and which of them are pressing *this* button.
    *
-   * The log is module-level rather than a `useRef`, because a purchase remounts
-   * its own row — buying `Unlock` in `BarsSheet` replaces the pressed button
-   * with two new ones — and the compatibility click that must be suppressed
-   * arrives after that, at whatever button is now under the finger. A per-
-   * instance ref is reset exactly when it is needed. See `buyActivation.ts`.
+   * Two scopes, deliberately, because the two facts have two lifetimes:
+   *
+   *  - the suppression log is module-level rather than a `useRef`, because a
+   *    purchase remounts its own row — buying `Unlock` in `BarsSheet` replaces
+   *    the pressed button with two new ones — and the compatibility click that
+   *    must be suppressed arrives after that, at whatever button is now under
+   *    the finger. A per-instance ref is reset exactly when it is needed.
+   *  - `pressedBy` is per instance, because `.cta--pressed` is. A shared one
+   *    let a cursor crossing *this* button clear a class another button's
+   *    leftover press had vouched for, pulling the press treatment out from
+   *    under a key still held down (R7). A remount clears it, which is right:
+   *    the new button has no class to clear either.
+   *
+   * See `buyActivation.ts`.
    */
+  const pressedBy = useRef<Set<number>>(new Set()).current;
+
   const activation = buyActivation({
     log: buyActivationLog,
     clock: performanceClock,
     inactive,
     onBuy,
     setPressed,
+    pressedBy,
   });
 
   return (
@@ -164,14 +176,19 @@ export function BuyButton({
       // the key handlers set the same class, and is withheld the same way.
       aria-disabled={inactive}
       onPointerDown={activation.pointerDown}
-      onPointerUp={activation.pointerEnd}
       // A finger is implicitly captured by the element that got `pointerdown`,
       // so touch always delivers its `up` here. `pointercancel` covers the
       // gesture being taken over (a scroll starting), and `pointerleave` the
       // mouse, which is *not* captured: dragged off the button before release
       // it fires neither, and the class would stick.
-      onPointerCancel={activation.pointerEnd}
-      onPointerLeave={activation.pointerEnd}
+      //
+      // The boolean is which kind this is. Only the first two are a release
+      // and may refresh the suppression window; a `pointerleave` is as often a
+      // cursor passing over a button nobody pressed, and letting one of those
+      // open a window costs a real keypress its purchase (R7).
+      onPointerUp={(event) => activation.pointerEnd(event, true)}
+      onPointerCancel={(event) => activation.pointerEnd(event, true)}
+      onPointerLeave={(event) => activation.pointerEnd(event, false)}
       // Focus can be taken while a key is held — a click elsewhere, or the row
       // this button sits in being replaced by the purchase itself — and then
       // the `keyup` never arrives here. Without this the press class sticks,

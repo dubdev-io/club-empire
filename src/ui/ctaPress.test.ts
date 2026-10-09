@@ -262,6 +262,25 @@ describe('BuyButton', () => {
     expect(sheet).toContain('buyActivationLog');
     expect(sheet).not.toContain('useRef(false)');
   });
+
+  it('keeps the press-class bookkeeping per instance, unlike the log', () => {
+    // The other half of the same decision (R7). `.cta--pressed` belongs to one
+    // element, so what clears it must too — sharing it let a cursor crossing
+    // one button drop the class on another. This is the one piece of state a
+    // remount *should* reset.
+    expect(sheet).toContain('useRef<Set<number>>(new Set()).current');
+    expect(sheet).toContain('pressedBy');
+  });
+
+  it('tells a release from a hover, which is the same handler on three events', () => {
+    // R7. `pointerup` and `pointercancel` are a release and may refresh the
+    // suppression window; `pointerleave` is as often a cursor passing over a
+    // button nobody pressed. Pinned at the source because the distinction is
+    // one boolean at the call site and nothing else would notice it going.
+    expect(sheet).toContain('onPointerUp={(event) => activation.pointerEnd(event, true)}');
+    expect(sheet).toContain('onPointerCancel={(event) => activation.pointerEnd(event, true)}');
+    expect(sheet).toContain('onPointerLeave={(event) => activation.pointerEnd(event, false)}');
+  });
 });
 
 /**
@@ -297,13 +316,17 @@ describe('buyActivation', () => {
   } = {}) {
     const onBuy = vi.fn();
     const setPressed = vi.fn();
+    // Per instance, never shared — that is the point of it (R7). Two buttons
+    // built from this helper share a `log` when told to and never a `pressedBy`.
+    const pressedBy = new Set<number>();
 
     return {
       onBuy,
       setPressed,
       log,
       clock,
-      handlers: buyActivation({ log, clock, inactive, onBuy, setPressed }),
+      pressedBy,
+      handlers: buyActivation({ log, clock, inactive, onBuy, setPressed, pressedBy }),
     };
   }
 
@@ -318,10 +341,12 @@ describe('buyActivation', () => {
   /**
    * One tap, in the order a browser fires it.
    *
-   * `pointerup` and `pointerleave` both land before the compatibility `click` —
-   * touch has implicit capture, so the pointer ceases to exist on release and
-   * the leave is fired for it. Which is why the window that suppresses the
-   * click is refreshed by them rather than cleared.
+   * `pointerup` *and then* `pointerleave` both land before the compatibility
+   * `click` — touch has implicit capture, so the pointer ceases to exist on
+   * release and the leave is fired for it. Both are in here, in that order,
+   * because the leave is the event R7 makes a no-op and the suppression has to
+   * keep working with it in the sequence, not merely without it: the `up`
+   * refreshes the window and the `leave` behind it is redundant.
    */
   function tap(
     b: ReturnType<typeof button>,
@@ -329,7 +354,8 @@ describe('buyActivation', () => {
   ): void {
     b.handlers.pointerDown({ pointerId });
     b.clock.advance(holdMs);
-    b.handlers.pointerEnd({ pointerId });
+    b.handlers.pointerEnd({ pointerId }, true); // `pointerup`
+    b.handlers.pointerEnd({ pointerId }, false); // the `pointerleave` fired for it
     b.clock.advance(clickAfterMs);
     b.handlers.click({ detail });
   }
@@ -374,7 +400,7 @@ describe('buyActivation', () => {
     expect(b.onBuy).toHaveBeenCalledTimes(1);
 
     b.clock.advance(80);
-    b.handlers.pointerEnd({ pointerId: MOUSE });
+    b.handlers.pointerEnd({ pointerId: MOUSE }, true);
     b.clock.advance(300);
     b.handlers.click({ detail: 1 });
     expect(b.onBuy).toHaveBeenCalledTimes(1);
@@ -466,7 +492,7 @@ describe('buyActivation', () => {
     const b = button();
 
     b.handlers.pointerDown({ pointerId: MOUSE });
-    b.handlers.pointerEnd({ pointerId: MOUSE });
+    b.handlers.pointerEnd({ pointerId: MOUSE }, true);
     for (const key of ['Tab', 'Shift', 'ArrowDown', 'a']) {
       b.handlers.keyDown({ key, repeat: false });
       b.handlers.keyUp({ key, repeat: false });
@@ -495,18 +521,22 @@ describe('buyActivation', () => {
       inactive: false,
       onBuy,
       setPressed: vi.fn(),
+      pressedBy: new Set(),
     });
     first.pointerDown({ pointerId: FINGER_1 });
     clock.advance(80);
-    first.pointerEnd({ pointerId: FINGER_1 });
+    first.pointerEnd({ pointerId: FINGER_1 }, true);
 
-    // The re-render that the purchase caused: a new button, a new instance.
+    // The re-render that the purchase caused: a new button, a new instance —
+    // and so a new `pressedBy`, which is the half of the state that *should*
+    // be reset by a remount. Only the log survives.
     const second = buyActivation({
       log,
       clock,
       inactive: false,
       onBuy,
       setPressed: vi.fn(),
+      pressedBy: new Set(),
     });
     clock.advance(300);
     second.click({ detail: 0 });
@@ -525,7 +555,7 @@ describe('buyActivation', () => {
       const b = button();
 
       b.handlers.pointerDown({ pointerId: MOUSE });
-      b.handlers.pointerEnd({ pointerId: MOUSE }); // `pointercancel`: the scroll took it.
+      b.handlers.pointerEnd({ pointerId: MOUSE }, true); // `pointercancel`: the scroll took it.
       expect(b.onBuy).toHaveBeenCalledTimes(1);
 
       b.clock.advance(POINTER_CLICK_WINDOW_MS);
@@ -540,7 +570,7 @@ describe('buyActivation', () => {
       const b = button();
 
       b.handlers.pointerDown({ pointerId: MOUSE });
-      b.handlers.pointerEnd({ pointerId: MOUSE });
+      b.handlers.pointerEnd({ pointerId: MOUSE }, true);
       b.clock.advance(POINTER_CLICK_WINDOW_MS - 1);
       b.handlers.click({ detail: 0 });
 
@@ -554,7 +584,7 @@ describe('buyActivation', () => {
       const b = button();
 
       b.handlers.pointerDown({ pointerId: MOUSE });
-      b.handlers.pointerEnd({ pointerId: MOUSE });
+      b.handlers.pointerEnd({ pointerId: MOUSE }, true);
       pressEnter(b);
 
       expect(b.onBuy).toHaveBeenCalledTimes(2);
@@ -659,13 +689,13 @@ describe('buyActivation', () => {
       expect(lane.onBuy).toHaveBeenCalledTimes(1);
 
       clock.advance(50);
-      upgrade.handlers.pointerEnd({ pointerId: FINGER_1 });
+      upgrade.handlers.pointerEnd({ pointerId: FINGER_1 }, true);
       upgrade.handlers.click({ detail: 0 });
 
       // Finger 2 held two seconds longer, well past the window measured from
       // its own `pointerdown`.
       clock.advance(2_000);
-      lane.handlers.pointerEnd({ pointerId: FINGER_2 });
+      lane.handlers.pointerEnd({ pointerId: FINGER_2 }, true);
       clock.advance(300);
       lane.handlers.click({ detail: 0 });
 
@@ -687,36 +717,125 @@ describe('buyActivation', () => {
     });
   });
 
-  describe('a pointer whose release never reaches a handler (N1)', () => {
-    it('does not let a passing cursor open a window no press opened', () => {
-      // The R3 teardown turned on its own gate: the detached element keeps
-      // implicit capture, so its `pointerup` reaches no handler and the entry
-      // is left standing. The mouse's `pointerId` is stable, so a cursor merely
-      // crossing a buy button later would find that entry, pass the gate and
-      // open a full window — the exact thing the gate exists to prevent.
+  describe('a pointer whose release never reaches a handler (N1, R7)', () => {
+    /**
+     * The entry nobody cleaned up, and the button it was left on.
+     *
+     * The R3 teardown turns on its own gate: the detached element keeps
+     * implicit capture, so its `pointerup` reaches no handler and the entry
+     * stays in the shared log. The mouse's `pointerId` is stable, so from then
+     * on *any* buy button sees an entry at that id that it never pressed.
+     *
+     * `ageMs` is five seconds by default and that is the point of R7: the
+     * sequence that strands an entry is a purchase unmounting its own button,
+     * so the dangerous stale entry is seconds old, not minutes, and every
+     * age cap wide enough to be safe lets it through.
+     */
+    function strandedMouseEntry({ ageMs = 5_000 } = {}) {
+      const log = createBuyActivationLog();
+      const clock = stopwatch();
+
+      const gone = button({ log, clock });
+      gone.handlers.pointerDown({ pointerId: MOUSE });
+      clock.advance(ageMs);
+
+      return { log, clock, live: button({ log, clock }) };
+    }
+
+    it('does not let a passing cursor swallow a held Space (R7)', () => {
+      // The parent bug back for one keypress, and the reason `released` exists.
+      // A `pointerleave` is as often a cursor crossing a button nobody pressed;
+      // read as a release it re-opened a full window, and the click handler's
+      // first guard then ate Space's genuine activation.
+      const { clock, live } = strandedMouseEntry();
+
+      live.handlers.keyDown({ key: ' ', repeat: false }); // clears the window
+      clock.advance(100);
+      live.handlers.pointerEnd({ pointerId: MOUSE }, false); // the cursor crosses
+      clock.advance(200);
+      live.handlers.keyUp({ key: ' ' });
+      live.handlers.click({ detail: 0 });
+
+      expect(live.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let that cursor steal the press class from a held key (R7, N2)', () => {
+      // The same stale entry through the other branch. `pressedBy` is per
+      // instance precisely so this button can say "that pointer was never
+      // pressing *me*" — a shared map cannot, and answered for a button that
+      // no longer exists.
+      const { live } = strandedMouseEntry();
+
+      live.handlers.keyDown({ key: 'Enter', repeat: false });
+      expect(live.setPressed).toHaveBeenLastCalledWith(true);
+
+      live.handlers.pointerEnd({ pointerId: MOUSE }, false);
+
+      expect(live.setPressed).toHaveBeenLastCalledWith(true);
+    });
+
+    it('does not let a passing cursor open a window on a button never pressed at all', () => {
+      // The empty-map branch, which is the easy half and still has to hold.
+      const b = button();
+
+      b.handlers.pointerEnd({ pointerId: MOUSE }, false);
+      b.handlers.click({ detail: 0 });
+
+      expect(b.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses to refresh on a release that is genuine but impossibly old (N1)', () => {
+      // `released` carries R7; the age cap stays as the backstop behind it, for
+      // the `pointerup` of a press this log never saw — a mouse pressed on the
+      // card and released over the button. That gesture produces no click here
+      // to suppress, only a window that could swallow the next real one.
+      const { live } = strandedMouseEntry({ ageMs: POINTER_DOWN_MAX_AGE_MS });
+
+      live.handlers.pointerEnd({ pointerId: MOUSE }, true);
+      live.handlers.click({ detail: 0 });
+
+      expect(live.onBuy).toHaveBeenCalledTimes(1);
+    });
+
+    it('prunes entries no release will ever come for', () => {
+      // Entries leave only through a release, and a press that unmounts its own
+      // button never delivers one — so without this the map is the one piece of
+      // state here that cannot expire, and a long session grows it without
+      // bound. 50 presses that tear down their own row is an ordinary evening
+      // in an incremental game.
+      const log = createBuyActivationLog();
+      const clock = stopwatch();
+
+      // Close enough together that none of them is stale yet, so this half
+      // really does show the entries piling up rather than the prune running
+      // mid-loop.
+      for (let i = 0; i < 50; i += 1) {
+        button({ log, clock }).handlers.pointerDown({ pointerId: 100 + i });
+        clock.advance(100);
+      }
+      expect(log.downPointers.size).toBe(50);
+
+      clock.advance(POINTER_DOWN_MAX_AGE_MS);
+      button({ log, clock }).handlers.pointerDown({ pointerId: MOUSE });
+
+      // Only the one just pressed survives.
+      expect(log.downPointers.size).toBe(1);
+      expect(log.downPointers.has(MOUSE)).toBe(true);
+    });
+
+    it('still clears the press class when the mouse is dragged off a button it is pressing', () => {
+      // What `pointerleave` is wired up for in the first place, and the thing
+      // R7 must not cost: the mouse is *not* implicitly captured, so a drag off
+      // the button before release fires no `pointerup` here and the class would
+      // otherwise stick on a button nobody is touching.
       const b = button();
 
       b.handlers.pointerDown({ pointerId: MOUSE });
-      b.clock.advance(POINTER_DOWN_MAX_AGE_MS);
-
-      // `pointerleave`, no press: the cursor just went over the button.
-      b.handlers.pointerEnd({ pointerId: MOUSE });
-      b.handlers.click({ detail: 0 });
-
-      expect(b.onBuy).toHaveBeenCalledTimes(2);
-    });
-
-    it('leaves the press class alone, which may belong to a key (N2)', () => {
-      // `pointerleave` fires whenever the cursor crosses the button. Clearing
-      // the class there unconditionally dropped `.cta--pressed` mid-keypress.
-      const b = button();
-
-      b.handlers.keyDown({ key: 'Enter', repeat: false });
       expect(b.setPressed).toHaveBeenLastCalledWith(true);
 
-      b.handlers.pointerEnd({ pointerId: MOUSE });
+      b.handlers.pointerEnd({ pointerId: MOUSE }, false);
 
-      expect(b.setPressed).toHaveBeenLastCalledWith(true);
+      expect(b.setPressed).toHaveBeenLastCalledWith(false);
     });
   });
 
@@ -785,12 +904,14 @@ describe('buyActivation', () => {
       const clock = stopwatch();
       const onBuy = vi.fn();
 
-      buyActivation({ log, clock, inactive: true, onBuy, setPressed: vi.fn() }).pointerDown({
-        pointerId: MOUSE,
-      });
+      const pressedBy = new Set<number>();
+
+      buyActivation({ log, clock, inactive: true, onBuy, setPressed: vi.fn(), pressedBy }).pointerDown(
+        { pointerId: MOUSE },
+      );
       clock.advance(380);
       // The re-render. Same log, same element, `inactive` now false.
-      buyActivation({ log, clock, inactive: false, onBuy, setPressed: vi.fn() }).click({
+      buyActivation({ log, clock, inactive: false, onBuy, setPressed: vi.fn(), pressedBy }).click({
         detail: 0,
       });
 
