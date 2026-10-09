@@ -54,9 +54,18 @@
  */
 
 import { pathToFileURL } from 'node:url';
+import { Cdp, pageTarget, sleep } from './cdp.ts';
 
 const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:4173';
-const DEBUG_URL = process.env.CLUB_CDP ?? 'http://127.0.0.1:9222';
+
+/**
+ * A single CDP call may take this long before it counts as hung.
+ *
+ * Longer than the shared default, because this is the only tool that drives the
+ * page at 20x CPU throttling: a `Page.navigate` under that is slow on purpose,
+ * and a timeout tuned for an unthrottled tool would fire on a healthy run.
+ */
+const CDP_TIMEOUT_MS = 180_000;
 
 /** Same threshold the component uses. Kept as a literal: this is the oracle. */
 const GATE_MS = 1000;
@@ -64,8 +73,27 @@ const GATE_MS = 1000;
 /** One frame of slack at the gate, so a sample landing on it is not a failure. */
 const GRACE_MS = 32;
 
+/**
+ * A positive-number knob off the environment.
+ *
+ * Unset and empty both mean the default: `Number('')` is 0, and `CLUB_BOOT_WAIT_MS=`
+ * collapsing the wait budget to zero would have every load report `no-boot` for
+ * a reason that is nowhere on screen. A value that is present but not a positive
+ * number is an error rather than a default — the caller plainly meant to set
+ * something, and quietly ignoring them is the same silence this tool exists to
+ * not keep.
+ */
+export function envCount(name: string, fallback: number, raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name}=${JSON.stringify(raw)} is not a positive number`);
+  }
+  return value;
+}
+
 /** How many times to repeat each rate. The failure was intermittent by nature. */
-const REPEATS = Number(process.env.CLUB_BOOT_REPEATS ?? 1);
+const repeats = (): number => envCount('CLUB_BOOT_REPEATS', 1, process.env.CLUB_BOOT_REPEATS);
 
 /**
  * How long to let a measured load run before reading its record back.
@@ -76,7 +104,7 @@ const REPEATS = Number(process.env.CLUB_BOOT_REPEATS ?? 1);
  * fails the run rather than being averaged away, so there has to be a knob.
  */
 const waitMsFor = (rate: number): number =>
-  Number(process.env.CLUB_BOOT_WAIT_MS ?? Math.max(5_000, 1_000 * rate));
+  envCount('CLUB_BOOT_WAIT_MS', Math.max(5_000, 1_000 * rate), process.env.CLUB_BOOT_WAIT_MS);
 
 const RATES = process.argv.slice(2).map(Number).filter(Number.isFinite);
 
@@ -123,69 +151,35 @@ interface RunReport {
   verdict: 'pass' | 'fail' | 'n/a' | 'no-boot';
 }
 
-class Cdp {
-  private readonly socket: WebSocket;
-  private nextId = 1;
-  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
-  private constructor(socket: WebSocket) {
-    this.socket = socket;
-    this.socket.addEventListener('message', (event) => {
-      const message = JSON.parse(String((event as MessageEvent).data)) as {
-        id?: number;
-        result?: unknown;
-        error?: { message: string };
-      };
-      if (message.id === undefined) return;
-      const waiter = this.pending.get(message.id);
-      if (waiter === undefined) return;
-      this.pending.delete(message.id);
-      if (message.error) waiter.reject(new Error(message.error.message));
-      else waiter.resolve(message.result);
-    });
-  }
-
-  static async connect(wsUrl: string): Promise<Cdp> {
-    const socket = new WebSocket(wsUrl);
-    await new Promise<void>((resolve, reject) => {
-      socket.addEventListener('open', () => resolve(), { once: true });
-      socket.addEventListener('error', () => reject(new Error(`cannot connect to ${wsUrl}`)), { once: true });
-    });
-    return new Cdp(socket);
-  }
-
-  send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    const id = this.nextId++;
-    this.socket.send(JSON.stringify({ id, method, params }));
-    return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      setTimeout(() => {
-        if (this.pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
-      }, 180_000);
-    });
-  }
-
-  async evaluate<T = unknown>(expression: string): Promise<T> {
-    const result = await this.send<{
-      result: { value?: T };
-      exceptionDetails?: { text: string; exception?: { description?: string } };
-    }>('Runtime.evaluate', {
-      expression: `(() => { ${expression} })()`,
-      returnByValue: true,
-      awaitPromise: true,
-    });
-    if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
+/**
+ * Wait for the quiet page to actually be the quiet page.
+ *
+ * A fixed sleep after `Page.navigate` is a guess about the host, not about the
+ * page, and on a loaded box the guess is wrong: the document is still the opaque
+ * `about:blank` origin when the budget runs out, and reading `localStorage` off
+ * it throws `SecurityError`. That is a measurement the instrument never took,
+ * dressed as a failure of the thing being measured — which is the mistake this
+ * whole tool is an apology for. So wait on the condition instead of on a clock.
+ *
+ * Only for the unthrottled bookend pages. The measured load keeps its fixed
+ * budget, because there the elapsed time *is* the subject.
+ */
+async function quietPageReady(cdp: Cdp, what: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      const ok = await cdp.evaluate<boolean>(
+        "return location.origin !== 'null' && document.readyState !== 'loading';",
+      );
+      if (ok) return;
+    } catch {
+      // Same-document-less window mid-navigation: not ready, not yet an error.
     }
-    return result.result.value as T;
-  }
-
-  close(): void {
-    this.socket.close();
+    if (Date.now() > deadline) throw new Error(`the quiet page never settled before ${what}`);
+    await sleep(100);
   }
 }
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * The in-page probe, installed before a byte of the bundle has run.
@@ -368,7 +362,7 @@ async function measure(cdp: Cdp, rate: number, repeat: number): Promise<RunRepor
   // a previous run's save (and its offline card) out of the boot path.
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
-  await sleep(600);
+  await quietPageReady(cdp, 'clearing the previous save');
   await cdp.evaluate('localStorage.clear(); return true;');
   await cdp.send('Network.clearBrowserCache');
 
@@ -391,7 +385,7 @@ async function measure(cdp: Cdp, rate: number, repeat: number): Promise<RunRepor
   // Read from a fresh page, not from the measured one: the game owns the main
   // thread by now and a `Runtime.evaluate` against it waits tens of seconds.
   await cdp.send('Page.navigate', { url: `${BASE_URL}/?noboot=1` });
-  await sleep(600);
+  await quietPageReady(cdp, 'reading the timeline back');
   const raw = await cdp.evaluate<string | null>(
     "return localStorage.getItem('__clubBootTimeline');",
   );
@@ -417,14 +411,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const targets = (await (await fetch(`${DEBUG_URL}/json/list`)).json()) as {
-    type: string;
-    webSocketDebuggerUrl: string;
-  }[];
-  const page = targets.find((t) => t.type === 'page');
-  if (page === undefined) throw new Error('no page target; is Chrome running with --remote-debugging-port?');
-
-  const cdp = await Cdp.connect(page.webSocketDebuggerUrl);
+  const cdp = await Cdp.connect(await pageTarget(), CDP_TIMEOUT_MS);
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
   await cdp.send('Network.enable');
@@ -452,7 +439,7 @@ async function main(): Promise<void> {
 
   const reports: RunReport[] = [];
   for (const rate of RATES) {
-    for (let repeat = 1; repeat <= REPEATS; repeat += 1) {
+    for (let repeat = 1; repeat <= repeats(); repeat += 1) {
       const result = await measure(cdp, rate, repeat);
       reports.push(result);
       console.log(row(result));
@@ -462,9 +449,16 @@ async function main(): Promise<void> {
   const { failures, unbooted, overdue, code } = tally(reports);
   console.log(`  ${'-'.repeat(86)}`);
   console.log('');
-  console.log(
-    `  ${overdue.length} of ${reports.length} loads were still booting at the threshold; ${failures.length} failed.`,
-  );
+  // The verdict leads. The counts alone read the same whether the run passed or
+  // not — "0 of 8 loads were still booting at the threshold" is the shape of the
+  // false green this tool shipped twice, and it should not be the first thing a
+  // reader has to interpret.
+  const headline = code === 0 ? 'PASS' : failures.length > 0 ? 'FAIL' : 'NO MEASUREMENT';
+  const summary =
+    `  ${headline} — ${overdue.length} of ${reports.length} loads were still booting ` +
+    `at the threshold; ${failures.length} failed.`;
+  if (code === 0) console.log(summary);
+  else console.error(summary);
   console.log('  owed/missing are ms of the boot screen past the threshold, not frame counts:');
   console.log('  a blocked main thread samples no frames, and a window with no samples in it');
   console.log('  scores zero missing frames whatever is on screen. `dark/seen` is the frames');

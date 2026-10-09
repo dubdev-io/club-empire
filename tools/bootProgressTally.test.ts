@@ -14,7 +14,7 @@
  * that can produce an exit of 0 are the ones that came from a measurement.
  */
 import { describe, expect, it } from 'vitest';
-import { tally } from './boot-progress.ts';
+import { envCount, tally } from './boot-progress.ts';
 
 type Verdict = 'pass' | 'fail' | 'n/a' | 'no-boot';
 
@@ -66,5 +66,29 @@ describe('the run-level verdict', () => {
     expect(overdue).toHaveLength(2);
     expect(failures).toHaveLength(1);
     expect(unbooted).toHaveLength(1);
+  });
+});
+
+describe('the environment knobs', () => {
+  it('treats unset and empty alike as the default', () => {
+    // `CLUB_BOOT_WAIT_MS=` is `Number('')`, which is 0. A zero wait budget reads
+    // back every load before it booted, so the whole run reports `no-boot` for a
+    // reason that is nowhere in the output.
+    expect(envCount('CLUB_BOOT_WAIT_MS', 5_000, undefined)).toBe(5_000);
+    expect(envCount('CLUB_BOOT_WAIT_MS', 5_000, '')).toBe(5_000);
+    expect(envCount('CLUB_BOOT_WAIT_MS', 5_000, '   ')).toBe(5_000);
+  });
+
+  it('takes a value that was actually given', () => {
+    expect(envCount('CLUB_BOOT_WAIT_MS', 5_000, '12000')).toBe(12_000);
+    expect(envCount('CLUB_BOOT_REPEATS', 1, '3')).toBe(3);
+  });
+
+  it('refuses a value that is present but not a positive number', () => {
+    // Present-but-unusable is operator error, not a request for the default:
+    // silently substituting one would hide the typo behind a plausible run.
+    for (const raw of ['0', '-1', 'soon', 'NaN']) {
+      expect(() => envCount('CLUB_BOOT_WAIT_MS', 5_000, raw)).toThrow(/not a positive number/);
+    }
   });
 });

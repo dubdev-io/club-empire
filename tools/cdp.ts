@@ -1,6 +1,6 @@
 /**
  * A minimal Chrome DevTools Protocol client, shared by the tools that need a
- * real browser: `screenshots.ts` and `contrast.ts`.
+ * real browser: `screenshots.ts`, `contrast.ts` and `boot-progress.ts`.
  *
  * No new dependency. Node 24 has a global `WebSocket`, and CDP is a JSON
  * protocol over it. A `puppeteer` install is not worth it in a repo whose whole
@@ -19,15 +19,26 @@ interface CdpTarget {
   url: string;
 }
 
+/**
+ * How long a single CDP call may take before it is treated as hung.
+ *
+ * Raised by `boot-progress.ts`, which drives the page at up to 20x CPU
+ * throttling: a `Page.navigate` there can outlast a budget that is generous for
+ * an unthrottled tool.
+ */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
 export class Cdp {
   private readonly socket: WebSocket;
   private nextId = 1;
+  private readonly timeoutMs: number;
   private readonly pending = new Map<
     number,
     { resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
 
-  private constructor(socket: WebSocket) {
+  private constructor(socket: WebSocket, timeoutMs: number) {
+    this.timeoutMs = timeoutMs;
     this.socket = socket;
     this.socket.addEventListener('message', (event) => {
       const message = JSON.parse(String((event as MessageEvent).data)) as {
@@ -44,7 +55,7 @@ export class Cdp {
     });
   }
 
-  static async connect(wsUrl: string): Promise<Cdp> {
+  static async connect(wsUrl: string, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<Cdp> {
     const socket = new WebSocket(wsUrl);
     await new Promise<void>((resolve, reject) => {
       socket.addEventListener('open', () => resolve(), { once: true });
@@ -52,7 +63,7 @@ export class Cdp {
         once: true,
       });
     });
-    return new Cdp(socket);
+    return new Cdp(socket, timeoutMs);
   }
 
   send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -64,7 +75,7 @@ export class Cdp {
       // whole script with no indication of which step stalled.
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
-      }, 30_000);
+      }, this.timeoutMs);
     });
   }
 
