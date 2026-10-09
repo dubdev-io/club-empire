@@ -423,6 +423,34 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 1200,
   },
+  {
+    // The third kind of dead-end tap, and the one the DUB-42 rebase created.
+    //
+    // A maxed row is `aria-disabled` but *not* `disabled`, so it is still
+    // tappable and §9 still wants an answer. It gets one: the handlers are
+    // attached unconditionally, so `cta--pressed` lands here too and the row
+    // takes the scale and the ring. It cannot take the price flash — a maxed
+    // row has a `.cta__done` badge where the price would be.
+    //
+    // This is the state to read against 11-club-complete, which is the same
+    // rows at rest. DUB-42 moved the `aria-disabled` dim off the button and
+    // onto the label so the gold badge clears AA; this shot is the check that
+    // the press does not undo that *at rest* — only while a finger is down.
+    name: '23-cta-pressed-maxed',
+    note: 'a finger down on a maxed row — scale and ring, no price flash, DUB-42 badge treatment intact',
+    seed: FRESH,
+    drive: `
+      window.__club.buyAll();
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      // buyAll() finishes the club, so the CLUB COMPLETE modal raises over the
+      // sheet. Dismissed the same way [KEEP PLAYING] dismisses it.
+      s.setShowComplete(false);
+      s.openSheet('bars');
+      setTimeout(${PRESS_CTA}('Lv 30'), 400);
+    `,
+    settleMs: 1200,
+  },
 ];
 
 // ---------------------------------------------------------------------------
