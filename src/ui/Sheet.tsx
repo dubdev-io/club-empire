@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { buyActivation, buyActivationLog, performanceClock } from './buyActivation.ts';
 import { ctaClassName } from './ctaClass.ts';
 
 /**
@@ -57,10 +58,17 @@ export function Sheet({ title, subtitle, onClose, children }: SheetProps): React
 /**
  * The primary action in a sheet: 56 px tall, full width minus two gutters.
  *
- * `onPointerDown`, not `onClick`: on mobile `click` fires up to ~300 ms after
- * the finger lands, and that delay is the whole difference between a button
- * that feels connected and one that feels dead. Criterion 2 is a 100 ms
- * budget — `click` alone can miss it on its own.
+ * The pointer buys on `onPointerDown`, not `onClick`: on mobile `click` fires
+ * up to ~300 ms after the finger lands, and that delay is the whole difference
+ * between a button that feels connected and one that feels dead. Criterion 2 is
+ * a 100 ms budget — `click` alone can miss it on its own.
+ *
+ * `onClick` is there as well, but only for the activation a pointer never
+ * makes: Enter and Space on a focused button produce a `click` and no
+ * `pointerdown`, so for a keyboard player the fast path above was no path at
+ * all (DUB-51). Which event gets to spend money — and how a tap is kept from
+ * spending it twice, and a leaned-on Enter key from spending it thirty times a
+ * second — is `buyActivation.ts`.
  *
  * Unaffordable is signalled two ways, because §9 forbids colour alone: a lock
  * glyph before the price, and the price itself in `--ink-disabled`. The
@@ -68,7 +76,7 @@ export function Sheet({ title, subtitle, onClose, children }: SheetProps): React
  * isDone`, never `!affordable`, so an unaffordable button keeps full opacity.
  *
  * Both of those are *at rest*. The press is signalled separately, and from
- * pointer events rather than left to CSS `:active` — see `pressed` below.
+ * the input events rather than left to CSS `:active` — see `pressed` below.
  */
 export interface BuyButtonProps {
   readonly label: string;
@@ -94,11 +102,11 @@ export function BuyButton({
   const inactive = disabled || isDone;
 
   /*
-   * The pressed state, driven from pointer events instead of CSS `:active`.
+   * The pressed state, driven from input events instead of CSS `:active`.
    *
-   * `.cta:active` is still in the stylesheet and still carries the mouse and
-   * the keyboard, but it cannot be the *only* source on the device this game
-   * targets. iOS Safari withholds `:active` on touch unless a touch handler
+   * `.cta:active` is still in the stylesheet and still carries the mouse, but
+   * it cannot be the *only* source on either of the inputs that matter here.
+   * iOS Safari withholds `:active` on touch unless a touch handler
    * sits in the element's ancestor chain, and React's root-level `pointerdown`
    * delegation is not one; `global.css` also clears
    * `-webkit-tap-highlight-color` document-wide, so the platform's own press
@@ -106,14 +114,48 @@ export function BuyButton({
    * as no feedback at all — which is the whole of DUB-38. A class we set
    * ourselves cannot.
    *
-   * One `useState` per button, set on `pointerdown` and cleared on the way up.
-   * This is sheet UI, not the game loop: it re-renders one button, and it does
-   * it in the same event, so the paint lands on the next frame either way.
+   * The keyboard has the narrower version of the same problem. A held Space is
+   * reliably `:active`, but Enter's activation is instantaneous and whether it
+   * paints `:active` at all is the browser's own business — so on a dead-end
+   * button, where the press treatment is the entire answer to the press, an
+   * Enter could have produced nothing to see. So the key events set the class
+   * too (DUB-51).
+   *
+   * One `useState` per button, set on `pointerdown`/`keydown` and cleared on
+   * the way up. This is sheet UI, not the game loop: it re-renders one button,
+   * and it does it in the same event, so the paint lands on the next frame
+   * either way.
    */
   const [pressed, setPressed] = useState(false);
-  const release = (): void => {
-    setPressed(false);
-  };
+
+  /*
+   * Which events may buy, and which of them are pressing *this* button.
+   *
+   * Two scopes, deliberately, because the two facts have two lifetimes:
+   *
+   *  - the suppression log is module-level rather than a `useRef`, because a
+   *    purchase remounts its own row — buying `Unlock` in `BarsSheet` replaces
+   *    the pressed button with two new ones — and the compatibility click that
+   *    must be suppressed arrives after that, at whatever button is now under
+   *    the finger. A per-instance ref is reset exactly when it is needed.
+   *  - `pressedBy` is per instance, because `.cta--pressed` is. A shared one
+   *    let a cursor crossing *this* button clear a class another button's
+   *    leftover press had vouched for, pulling the press treatment out from
+   *    under a key still held down (R7). A remount clears it, which is right:
+   *    the new button has no class to clear either.
+   *
+   * See `buyActivation.ts`.
+   */
+  const pressedBy = useRef<Set<number>>(new Set()).current;
+
+  const activation = buyActivation({
+    log: buyActivationLog,
+    clock: performanceClock,
+    inactive,
+    onBuy,
+    setPressed,
+    pressedBy,
+  });
 
   return (
     <button
@@ -130,22 +172,35 @@ export function BuyButton({
       // treatment instead (`.cta--pressed` in ui.css): the button shrinks, its
       // edge lights up where it used to dissolve into the card behind it, and
       // on a tap that buys nothing the price lights up with it. `onBuy` is
-      // still withheld.
+      // still withheld. A keypress on the same button reads the same, because
+      // the key handlers set the same class, and is withheld the same way.
       aria-disabled={inactive}
-      onPointerDown={() => {
-        // Feedback first and unconditionally. The tap that buys nothing is
-        // exactly the one this button used to swallow.
-        setPressed(true);
-        if (!inactive) onBuy();
-      }}
-      onPointerUp={release}
+      onPointerDown={activation.pointerDown}
       // A finger is implicitly captured by the element that got `pointerdown`,
       // so touch always delivers its `up` here. `pointercancel` covers the
       // gesture being taken over (a scroll starting), and `pointerleave` the
       // mouse, which is *not* captured: dragged off the button before release
       // it fires neither, and the class would stick.
-      onPointerCancel={release}
-      onPointerLeave={release}
+      //
+      // The boolean is which kind this is. Only the first two are a release
+      // and may refresh the suppression window; a `pointerleave` is as often a
+      // cursor passing over a button nobody pressed, and letting one of those
+      // open a window costs a real keypress its purchase (R7).
+      onPointerUp={(event) => activation.pointerEnd(event, true)}
+      onPointerCancel={(event) => activation.pointerEnd(event, true)}
+      onPointerLeave={(event) => activation.pointerEnd(event, false)}
+      // Focus can be taken while a key is held — a click elsewhere, or the row
+      // this button sits in being replaced by the purchase itself — and then
+      // the `keyup` never arrives here. Without this the press class sticks,
+      // and so does the held key's suppression of clicks it will never make
+      // again, which costs the next synthetic activation its purchase.
+      onBlur={activation.cancelPress}
+      // The keyboard's three events. Neither key event buys: they set the press
+      // treatment, and they tell the click handler whether the click on its way
+      // is a fresh keypress, a key *repeat*, or the tail of an earlier tap.
+      onKeyDown={activation.keyDown}
+      onKeyUp={activation.keyUp}
+      onClick={activation.click}
     >
       <span className="cta__label">{label}</span>
       {isDone ? (
