@@ -51,7 +51,8 @@ npm run sim:economy      # the economy MODEL against the §4.4 table (DUB-4)
 npm run sim:autobuy      # the SHIPPING game against the same table
 node tools/autobuy.ts --tap   # ...with a player collecting every bubble
 
-npm run shots            # all ten states at 390x844 and 1440x900
+npm run shots            # every state at 390x844 and 1440x900, plus the
+                         # rotate prompt at 844x390 — that phone turned
 npm run measure:frames   # per-system frame time at the §11 entity ceiling
 npm run measure:contrast # WCAG ratios off the painted pixels, not the stylesheet
 ```
