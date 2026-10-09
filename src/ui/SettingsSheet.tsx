@@ -19,6 +19,10 @@ export function SettingsSheet(): React.JSX.Element {
 
   const [confirmingReset, setConfirmingReset] = useState(false);
 
+  // One resolved boolean feeds both the state word and the hint, so the two
+  // cannot drift apart again — the DUB-73 defect in its general form.
+  const reducedMotionOn = resolveReducedMotionToggle(settings.reducedMotion);
+
   return (
     <Sheet title="Settings" onClose={closeSheet}>
       <Toggle
@@ -30,12 +34,8 @@ export function SettingsSheet(): React.JSX.Element {
 
       <Toggle
         label="Reduced motion"
-        hint={
-          settings.reducedMotion === 'auto'
-            ? 'Following your device setting. Shake and confetti become a flash.'
-            : 'Shake and confetti become a flash. Feedback is never removed.'
-        }
-        on={resolveReducedMotionToggle(settings.reducedMotion)}
+        hint={reducedMotionHint(settings.reducedMotion, reducedMotionOn)}
+        on={reducedMotionOn}
         onChange={(on) => setSettings({ ...settings, reducedMotion: on ? 'on' : 'off' })}
       />
 
@@ -95,11 +95,43 @@ export function SettingsSheet(): React.JSX.Element {
 }
 
 /**
+ * The hint under the reduced-motion toggle. It must describe the state the
+ * control is actually in, which is `resolvedOn` — not the stored value.
+ *
+ * Four sentences for three values, because `auto` renders two different states.
+ * A two-way ternary here described *on* whenever the setting was `off`, so a
+ * player who had just turned reduced motion off read that shake and confetti
+ * had become a flash — the control said Off and the copy under it said On
+ * (DUB-73). The same contradiction then turned up on `auto` under
+ * `prefers-reduced-motion: no-preference`, which is the first-run default on
+ * most phones: control Off, copy describing a flash that is not happening.
+ * Hence `resolvedOn` rather than a third string keyed off the value alone.
+ *
+ * The `off` line also carries a disclosure the player would otherwise have to
+ * discover: an explicit `off` overrides the OS, so the sheet entrance, the card
+ * entrance and the buy-button press scale come back even on a device whose
+ * `prefers-reduced-motion` asks for less. That is the one state where we act
+ * against a stated device preference, so we say so at the control.
+ *
+ * The two `auto` lines differ only in their second sentence, and "for now" is
+ * doing work: `auto` can flip without the player touching anything.
+ */
+export function reducedMotionHint(value: 'auto' | 'on' | 'off', resolvedOn: boolean): string {
+  if (value === 'auto') {
+    return resolvedOn
+      ? 'Following your device setting. Shake and confetti become a flash.'
+      : 'Following your device setting. Shake and confetti stay for now.';
+  }
+  if (value === 'on') return 'Shake and confetti become a flash. Feedback is never removed.';
+  return 'Shake, confetti and button motion stay on, whatever your device asks for.';
+}
+
+/**
  * `auto` is shown as the resolved device preference rather than as a third
  * state. Three-state toggles in a settings list are a usability tax, and the
  * hint line already says which it is following.
  */
-function resolveReducedMotionToggle(value: 'auto' | 'on' | 'off'): boolean {
+export function resolveReducedMotionToggle(value: 'auto' | 'on' | 'off'): boolean {
   if (value === 'on') return true;
   if (value === 'off') return false;
   return typeof window !== 'undefined'
