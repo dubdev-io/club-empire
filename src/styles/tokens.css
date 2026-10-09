@@ -89,6 +89,11 @@
   --cta-height: 56px;
   /* Bottom sheets cap at 70% of the viewport. */
   --sheet-max-height: 70dvh;
+  /* The rotate prompt's content column — the one screen that lays out against
+     the viewport rather than the portrait stage (DUB-90). 280 px because "Turn
+     your phone upright" measures 231.8 px on one line at --text-lg, and a
+     column that only just fits is one that wraps on the next copy change. */
+  --rotate-column-min: 280px;
 
   /* --- device safe area ----------------------------------------------- */
   /* CSS writes the four insets into custom properties so JS can read them

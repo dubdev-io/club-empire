@@ -1117,6 +1117,38 @@
   background: var(--bg-room);
 }
 
+/*
+ * The rotate prompt is the one screen that must escape the stage letterbox.
+ *
+ * `#ui-root` is sized to the 390x844 portrait stage, so at 844x390 it is a
+ * 180 px column in the middle of the window. That is right for the HUD, the
+ * sheets and the bottom bar, which belong over the canvas — and backwards
+ * here: the screen whose whole job is to say *this shape does not work* was
+ * saying it inside a box shaped like the shape that does, with the title
+ * broken over three lines of two words (DUB-90).
+ *
+ * `fixed` takes the viewport as its containing block, so the prompt lays out
+ * against the real window without `stage.ts` having to publish a second rect.
+ * The single grid track is the content column: at least --rotate-column-min,
+ * at most the 34ch measure `.fatal__body` already asks for and did not get.
+ *
+ * Scoped to the variant on purpose. `WebglUnavailable` uses the same `.fatal`
+ * base and renders in portrait, where the letterbox is the correct container.
+ */
+.fatal--rotate {
+  position: fixed;
+  display: grid;
+  grid-template-columns: minmax(min(var(--rotate-column-min), 100%), 34ch);
+  align-content: center;
+  justify-content: center;
+  justify-items: center;
+  /* A fixed child does not inherit #ui-root's safe-area padding, and a notch
+     sits on a *side* in landscape — which is the only orientation this screen
+     is ever shown in. */
+  padding: var(--space-6) max(var(--space-5), var(--safe-right)) var(--space-6)
+    max(var(--space-5), var(--safe-left));
+}
+
 .fatal__title {
   margin: 0;
   font-size: var(--text-lg);
