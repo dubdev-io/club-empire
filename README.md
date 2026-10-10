@@ -101,9 +101,15 @@ some loads and could not read others, `NO MEASUREMENT` is one that read none.
 On a loaded host the default wait budget — `max(5 s, 1 s × rate)` — can expire
 before a load has booted, which reports `no-boot` and fails the run rather than
 guessing. That is the intended behaviour, and the fix is to give it more room:
-`CLUB_BOOT_WAIT_MS=20000`. Checking the throttle is honest is worth it too; at
-load averages in the teens the rate Chrome actually applies drifts well below
-the one asked for, so prefer a quiet box for a figure you intend to quote.
+`CLUB_BOOT_WAIT_MS=25000 CLUB_BOOT_QUIET_MS=120000`. The second is the budget
+for the unthrottled pages either side of a measured load, and it has the same
+failure mode: run out and the run throws away measurements it had already taken.
+
+Prefer a quiet box for any figure you intend to quote. Under contention the
+boot windows scatter badly — the same rate produced a 69 ms window and a 2.7 s
+one on this host — so a single row is weak evidence either way. What survives
+the noise is the `missing` column: it is 0 or it is not, whatever the load was
+doing. Treat the `.boot window` times as context, not as a benchmark.
 
 `shots`, `measure:frames` and `measure:contrast` need a dev server and a headless
 Chrome with remote debugging:
