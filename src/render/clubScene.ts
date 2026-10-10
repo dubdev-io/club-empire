@@ -161,6 +161,25 @@ const BEAT_MIX_PEAK_LAST_CALL = 0.6;
  */
 const FLOOR_TILE_ALPHA = 0.82;
 
+/**
+ * Opacity of an unearned ☆ station pip. **A measured value, not a dim.**
+ *
+ * It was 0.5 when the unearned pip was a *solid* grey star and dimness was the
+ * signal. Now DUB-56 carries the signal in shape — a 2-unit hollow stroke — so
+ * the same alpha covers a fraction of the area, and the stroke measured 2.25:1
+ * against the tile, under the §9 / WCAG 1.4.11 3:1 non-text minimum. Thickening
+ * the stroke is not the lever: past ~2 units it closes the star's interior and
+ * the ☆ bakes as a filled ★ with a notch in it (see `starPips.test.ts`).
+ *
+ * 0.75 is the smallest step that clears 3:1 — peak stroke luminance 114 against
+ * a tile of 32, so 3.38:1, measured by `npm run shots:pips` at 390x844 DPR 2.
+ * **Deliberately not higher**: 0.85 reads 3.95:1 and 1.0 reads 4.97:1, and at
+ * full opacity the hollow star starts competing with the gold filled one for
+ * weight, which inverts what the row exists to say — earned is the primary
+ * element, unearned is the slot that is still open (DUB-75).
+ */
+const UNEARNED_PIP_ALPHA = 0.75;
+
 /** Guest walking speed on the dance floor, design px/second. */
 const WALK_SPEED = 26;
 
@@ -613,7 +632,7 @@ export class ClubScene {
         // this every sync costs nothing.
         pip.texture = earned ? this.textures.star : this.textures.starOutline;
         pip.tint = earned ? GOLD_VIP : INK_DISABLED;
-        pip.alpha = earned ? 1 : 0.5;
+        pip.alpha = earned ? 1 : UNEARNED_PIP_ALPHA;
       }
       // The neon sign is the ★ reward made physical — it appears on the floor
       // at the first star and brightens with each one.
