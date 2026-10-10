@@ -106,6 +106,10 @@ const repeats = (): number => envCount('CLUB_BOOT_REPEATS', 1, process.env.CLUB_
 const waitMsFor = (rate: number): number =>
   envCount('CLUB_BOOT_WAIT_MS', Math.max(5_000, 1_000 * rate), process.env.CLUB_BOOT_WAIT_MS);
 
+/** How long an unthrottled bookend page gets to settle. See `quietPageReady`. */
+const quietMs = (): number =>
+  envCount('CLUB_BOOT_QUIET_MS', 30_000, process.env.CLUB_BOOT_QUIET_MS);
+
 const RATES = process.argv.slice(2).map(Number).filter(Number.isFinite);
 
 interface Sample {
@@ -177,9 +181,14 @@ interface RunReport {
  *
  * Only for the unthrottled bookend pages. The measured load keeps its fixed
  * budget, because there the elapsed time *is* the subject.
+ *
+ * The budget is a knob rather than a constant because 30 s is itself a guess
+ * about the host, and on a box at load average ~20 it ran out mid-run and threw
+ * away eight loads' worth of measurement. Overridable with
+ * `CLUB_BOOT_QUIET_MS`.
  */
 async function quietPageReady(cdp: Cdp, what: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + quietMs();
   for (;;) {
     try {
       const ok = await cdp.evaluate<boolean>(
@@ -490,6 +499,7 @@ async function main(): Promise<void> {
   console.log(
     `  wait    ${RATES.map((r) => `${r}x:${waitMsFor(r)}ms`).join('  ')}  (CLUB_BOOT_WAIT_MS)`,
   );
+  console.log(`  quiet   ${quietMs()} ms per bookend page  (CLUB_BOOT_QUIET_MS)`);
   console.log('');
   console.log(
     `  ${'cpu'.padEnd(5)}${'rep'.padEnd(4)}${'.boot window'.padEnd(18)}${'.boot__progress'.padEnd(13)}` +

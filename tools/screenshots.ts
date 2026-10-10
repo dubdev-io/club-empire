@@ -54,6 +54,16 @@ interface Shot {
   readonly reducedMotion?: boolean;
   /** Extra settle time, for states with an animation worth catching. */
   readonly settleMs?: number;
+  /**
+   * An expression polled until it is true, with `settleMs` as the cap.
+   *
+   * For a state whose readiness is a fact about the page rather than a duration
+   * on the driver's clock. A fixed sleep measures from whenever the drive
+   * returned, which is not the navigation and not the start of the animation
+   * being waited out — so the number has to be padded for the worst host and is
+   * still only a guess. Where the page can be asked directly, ask it.
+   */
+  readonly settleUntil?: string;
 }
 
 const FRESH = `localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)});`;
@@ -119,14 +129,34 @@ const SHOTS: readonly Shot[] = [
     name: '01-boot',
     note: 'boot / loading — club silhouette, spinner, progress bar',
     seed: FRESH,
-    drive: `window.__clubStore.getState().setBooting(true, 0.45);`,
+    // Pinned, not merely set. `booting` belongs to the runtime, which clears it
+    // the moment its own boot finishes — and this shot deliberately does not
+    // wait for the runtime, so it is always racing it. The race is not losable
+    // by a wide enough margin to ignore: instrumented here, the settle condition
+    // went true with `.boot` up and the state was already false one CDP
+    // round-trip later, which is how a shot named `01-boot` kept returning the
+    // playing screen on a loaded host. Replacing `setBooting` with a no-op holds
+    // the screen still for as long as the capture needs, whatever the host does.
+    drive: `window.__clubStore.setState({
+      booting: true,
+      bootProgress: 0.45,
+      setBooting: () => {},
+    });`,
     // Past the 1 s reveal (DUB-21), or the shot has no progress bar in it — the
     // bar is in the tree from the first frame but transparent until the load has
-    // taken a second, and the default 400 ms landed inside that. The driver's
-    // own load is fast, so the capture has to wait the threshold out — 1400 ms
-    // rather than 1200 because the reveal ends at 1200 ms of *page* time and the
-    // sleep starts whenever the store turned up, which is not the navigation.
-    settleMs: 1400,
+    // taken a second, and the default 400 ms landed inside that.
+    //
+    // Waited out by asking the bar whether it is opaque yet, rather than by
+    // sleeping long enough that it ought to be. The reveal ends at 1200 ms of
+    // *page* time while a sleep starts whenever the drive returned, so any fixed
+    // number here is padding for the slowest host it might run on — which is the
+    // same mistake `measure:boot` made with its own fixed settles. 2000 is the
+    // cap, not the wait: a quiet host captures at ~1200.
+    settleUntil: `(() => {
+      const bar = document.querySelector('.boot__progress');
+      return bar !== null && Number(getComputedStyle(bar).opacity) >= 0.99;
+    })()`,
+    settleMs: 2000,
   },
   {
     name: '02-first-run',
@@ -536,7 +566,21 @@ async function main(): Promise<void> {
       }
 
       if (shot.drive !== undefined) await cdp.evaluate(`${shot.drive} return true;`);
-      await sleep(shot.settleMs ?? 400);
+      if (shot.settleUntil === undefined) {
+        await sleep(shot.settleMs ?? 400);
+      } else {
+        // The cap is still honoured, so this can only capture earlier than the
+        // sleep would have, never later — and a condition that never comes true
+        // degrades to exactly the old behaviour rather than hanging the run.
+        const deadline = Date.now() + (shot.settleMs ?? 400);
+        for (;;) {
+          const settled = await cdp
+            .evaluate<boolean>(`return Boolean(${shot.settleUntil});`)
+            .catch(() => false);
+          if (settled || Date.now() >= deadline) break;
+          await sleep(50);
+        }
+      }
 
       const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
         format: 'png',
