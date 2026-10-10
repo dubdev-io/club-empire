@@ -1175,18 +1175,79 @@
   }
 }
 
+/* Revealed by a CSS animation rather than mounted by a timer (DUB-21).
+   `startGame` holds the main thread for the whole boot window, so a `setTimeout`
+   due at the 1 s mark did not run until after the boot screen was already gone,
+   and the bar was missing on precisely the slow loads it exists for.
+
+   One 1.2 s animation — wait, then fade — rather than a 200 ms fade behind a 1 s
+   `animation-delay`. `BootScreen` gives it a *negative* delay equal to the time
+   this load has already taken, which seeks it to where it would be if it had
+   started at the navigation. A seek leaves nothing pending: the animation is
+   running from the first frame the bar is in the tree, where a delayed one has
+   not started and starting it is work for the thread the boot has taken.
+
+   `both`, with the hidden frames inside the keyframes rather than `opacity: 0`
+   on the rule itself: if animations are off the bar is simply visible, which is
+   a far better failure than a progress bar that can never be seen. */
 .boot__progress {
   width: 50%;
   height: var(--space-1);
   background: var(--bg-raised);
   border-radius: var(--radius-pill);
   overflow: hidden;
+  animation: boot-progress-reveal 1200ms linear both;
+}
+
+/* 83.333% of 1200ms is the 1 s threshold; the fade is the remaining 200 ms. */
+@keyframes boot-progress-reveal {
+  0%,
+  83.333% {
+    opacity: 0;
+  }
+
+  100% {
+    opacity: 1;
+  }
 }
 
 .boot__progress-fill {
   height: 100%;
   background: var(--neon-magenta);
   transition: width var(--motion-fast) linear;
+}
+
+/* Indeterminate, while there is no figure to report. Geometry and timing mirror
+   `bf-progress-fill` in `index.html` so the handover from the inlined fallback
+   to this one is invisible — which is also why the durations here are literals
+   rather than tokens: the inlined copy cannot read `tokens.css`.
+
+   `transform`, not `width`: a transform animation runs on the compositor, and
+   the point of this element is to keep moving through a boot that owns the main
+   thread. */
+.boot__progress-fill--sweep {
+  width: 40%;
+  animation: boot-progress-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes boot-progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(250%);
+  }
+}
+
+/* Criterion 6: the feedback is never simply removed. No sweep, but a filled
+   track that still says "working" rather than an empty one that says "stuck". */
+@media (prefers-reduced-motion: reduce) {
+  .boot__progress-fill--sweep {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
 }
 
 .fatal {

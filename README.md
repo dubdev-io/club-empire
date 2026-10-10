@@ -32,7 +32,7 @@ npm run dev
 # 3. Build — static production output into dist/
 npm run build
 
-# ...and to check the built output locally — http://localhost:4173
+# ...and to check the built output locally — http://localhost:4173/club-empire/
 npm run preview
 ```
 
@@ -54,6 +54,7 @@ node tools/autobuy.ts --tap   # ...with a player collecting every bubble
 npm run shots            # all ten states at 390x844 and 1440x900
 npm run measure:frames   # per-system frame time at the §11 entity ceiling
 npm run measure:contrast # WCAG ratios off the painted pixels, not the stylesheet
+npm run measure:boot -- 1 6 10 20   # the boot progress bar against the 1 s gate
 ```
 
 `sim:economy` and `sim:autobuy` read the same table from `src/config/pacing.ts`.
@@ -68,6 +69,48 @@ worked out from `tokens.css` misses whatever an ancestor `opacity` did to the
 text: that is how the MAXED badge came to be quoted at 3.13:1 when it rendered at
 4.31:1 (DUB-42).
 
+`measure:boot` is the DUB-21 regression instrument: it drives a cold load at a
+range of CPU throttles and reports how many **milliseconds** the boot screen was
+up past the 1 s threshold without `.boot__progress` in the DOM. Milliseconds and
+not frames: a blocked main thread fires no `requestAnimationFrame`, so a frame
+count over a slow boot window is a count of nothing and passes whatever is on
+screen.
+
+It wants the `preview` server rather than `dev`, because the thing it measures is
+bundle-parse and texture-generation timing, and `preview` serves the build under
+the Pages base path — so `CLUB_URL` needs that path on it:
+
+```bash
+npm run build && npm run preview &
+google-chrome --headless=new --remote-debugging-port=9222 --no-sandbox \
+  --enable-unsafe-swiftshader about:blank &
+CLUB_URL=http://127.0.0.1:4173/club-empire npm run measure:boot -- 1 6 10 20
+```
+
+Rate alone does not decide the outcome — whether the boot screen mounted before
+or after the threshold does — so run a few repeats:
+`CLUB_BOOT_REPEATS=3 npm run measure:boot -- 10`.
+
+It exits `1` on a load that was owed a bar and did not have one, and `3` on a
+load it could not read at all — no boot screen on the page, or none still up at
+the threshold. An instrument with no opinion must not report a pass, which is
+the false green both earlier versions of this tool managed to produce. The
+summary says which: `FAIL` is a broken bar, `INCOMPLETE` is a run that measured
+some loads and could not read others, `NO MEASUREMENT` is one that read none.
+
+On a loaded host the default wait budget — `max(5 s, 1 s × rate)` — can expire
+before a load has booted, which reports `no-boot` and fails the run rather than
+guessing. That is the intended behaviour, and the fix is to give it more room:
+`CLUB_BOOT_WAIT_MS=25000 CLUB_BOOT_QUIET_MS=120000`. The second is the budget
+for the unthrottled pages either side of a measured load, and it has the same
+failure mode: run out and the run throws away measurements it had already taken.
+
+Prefer a quiet box for any figure you intend to quote. Under contention the
+boot windows scatter badly — the same rate produced a 69 ms window and a 2.7 s
+one on this host — so a single row is weak evidence either way. What survives
+the noise is the `missing` column: it is 0 or it is not, whatever the load was
+doing. Treat the `.boot window` times as context, not as a benchmark.
+
 `shots`, `measure:frames` and `measure:contrast` need a dev server and a headless
 Chrome with remote debugging:
 
@@ -81,9 +124,10 @@ The production build is static files in `dist/`. There is no backend, no
 server and no database.
 
 **`npm run build` sets Vite's `base` to `/club-empire/`**, the GitHub Pages
-project subpath — without it every asset 404s under that path. The dev server
-is unaffected and still serves from `/`. `CLUB_EMPIRE_BASE` overrides both, for
-a host that serves from the root:
+project subpath — without it every asset 404s under that path. `npm run preview`
+uses the same base, because it serves that build output and has to answer on the
+paths baked into it. The dev server is unaffected and still serves from `/`.
+`CLUB_EMPIRE_BASE` overrides all of them, for a host that serves from the root:
 
 ```bash
 CLUB_EMPIRE_BASE=/ npm run build
@@ -135,6 +179,7 @@ tools/
   autobuy.ts            the shipping game vs the §4.4 table (criterion 1)
   screenshots.ts        all ten states, both viewports, over CDP
   frametime.ts          per-system frame time at the §11 ceiling (criterion 8)
+  boot-progress.ts      the boot progress bar against the 1 s gate (DUB-21)
 ```
 
 ## Where the balance numbers live

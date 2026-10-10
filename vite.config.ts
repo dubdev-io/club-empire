@@ -7,11 +7,20 @@ import react from '@vitejs/plugin-react';
  * every asset URL in the build has to carry that prefix or the page loads and
  * then 404s on its own JavaScript.
  *
- * Applied to `build` only. The dev server keeps serving from `/`, because
- * moving it to `/club-empire/` would change the URL every developer and the
- * screenshot driver already have. `CLUB_EMPIRE_BASE` overrides both, which is
- * what a different host (a root-served bucket, say) would need — and DUB-9
- * leaves the hosting choice with the owner.
+ * Applied to `build` — and to `preview`, which serves that same build output and
+ * so has to answer on the paths baked into it. `vite preview` loads this config
+ * with `command: 'serve'`, so keying on `command` alone left it serving `dist/`
+ * at `/` while `dist/index.html` asked for `/club-empire/assets/…`. The module
+ * script came back as the SPA fallback — `text/html` — was refused, and React
+ * never mounted: `npm run preview` could not load the page it exists to check,
+ * and `npm run measure:boot` pointed at it reported eight loads where the boot
+ * screen never appeared. Found in the PR #15 review.
+ *
+ * The dev server keeps serving from `/`, because moving it to `/club-empire/`
+ * would change the URL every developer and the screenshot driver already have.
+ * `CLUB_EMPIRE_BASE` overrides all of them, which is what a different host (a
+ * root-served bucket, say) would need — and DUB-9 leaves the hosting choice
+ * with the owner.
  */
 const PAGES_BASE = '/club-empire/';
 
@@ -36,9 +45,9 @@ function resolveBuildSha(): string {
   }
 }
 
-export default defineConfig(({ command }) => ({
+export default defineConfig(({ command, isPreview = false }) => ({
   plugins: [react()],
-  base: process.env.CLUB_EMPIRE_BASE ?? (command === 'build' ? PAGES_BASE : '/'),
+  base: process.env.CLUB_EMPIRE_BASE ?? (command === 'build' || isPreview ? PAGES_BASE : '/'),
   define: {
     __CLUB_BUILD__: JSON.stringify(command === 'build' ? resolveBuildSha() : 'dev'),
   },
