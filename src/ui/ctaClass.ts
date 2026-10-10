@@ -38,6 +38,18 @@ export interface CtaClassInput {
   readonly maxed: boolean;
   /** A finger or a cursor is down on it right now. */
   readonly pressed: boolean;
+  /**
+   * Motion is suppressed — `store.reducedMotion`, which is the OS preference
+   * composed with the Settings toggle, and never the OS preference alone.
+   *
+   * DUB-49: this used to be a bare `@media (prefers-reduced-motion: reduce)`
+   * in `ui.css`, which cannot see the toggle. It read the OS backwards in both
+   * directions: a player who switched reduced motion *on* in Settings still
+   * got the press scale, and one who switched it explicitly *off* lost it — and
+   * on an affordable button the scale is the only button-local press treatment
+   * there is, so that player got no answer to their thumb at all.
+   */
+  readonly still: boolean;
 }
 
 export function ctaClassName({
@@ -46,6 +58,7 @@ export function ctaClassName({
   inactive,
   maxed,
   pressed,
+  still,
 }: CtaClassInput): string {
   const classes = ['cta', `cta--${accent}`];
 
@@ -58,6 +71,11 @@ export function ctaClassName({
   if (maxed) classes.push('cta--maxed');
 
   if (pressed) classes.push('cta--pressed');
+
+  // Emitted at rest as well as pressed. The press rules it cancels are matched
+  // on `:active` too, and `:active` arrives without React rendering anything —
+  // so the flag has to already be on the element when the finger lands.
+  if (still) classes.push('cta--still');
 
   return classes.join(' ');
 }
