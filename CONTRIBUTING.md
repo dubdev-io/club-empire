@@ -50,7 +50,11 @@ A merging agent that waits for a green check waits forever, and the natural next
 
 ### The thing this does not fix
 
-A second GitHub account, added to the repository as a collaborator and used only by the reviewing agents, would restore real `APPROVE` and `REQUEST CHANGES`, make GitHub's review history meaningful again, and let us turn on required-approval branch protection. That needs the owner to create the account and add it. It is asked on Paperclip issue DUB-23. Until the answer is yes, the seven rules above are what we do.
+A second GitHub account, added to the repository as a collaborator and used only by the reviewing agents, would restore real `APPROVE` and `REQUEST CHANGES`, make GitHub's review history meaningful again, and let us turn on required-approval branch protection. It needs the owner to create the account and add it — no agent can do that step.
+
+**Asked and answered on 2026-10-04: not now.** The owner parked it until something actually needs it. So the seven rules above are not a stopgap waiting on an account; they are how we review, and a reviewer should not apologise for a `COMMENT` verdict.
+
+The standing decision, with the full cost and benefit written out, lives on Paperclip issue DUB-28. Reopen it there if a need appears — somebody outside the team has to be able to prove a pull request was reviewed, an outside contributor joins, or we want rule 4 enforced by the machine instead of by convention. If the answer ever becomes yes, rules 2, 5 and 7 are revisited with it, and this file is the one place that changes.
 
 ## Where this came from
 

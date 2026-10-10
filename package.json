@@ -15,6 +15,8 @@
     "sim:economy": "node tools/economy-sim.ts",
     "sim:autobuy": "node tools/autobuy.ts",
     "shots": "node tools/screenshots.ts",
+    "shots:pips": "node tools/pipshot.ts",
+    "a11y:burst": "node tools/burstax.ts",
     "measure:boot": "node tools/boot-progress.ts",
     "measure:contrast": "node tools/contrast.ts",
     "measure:frames": "node tools/frametime.ts"
