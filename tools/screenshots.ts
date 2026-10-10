@@ -199,18 +199,28 @@ interface PageGlobals {
 
 const ABSENT_GLOBALS: PageGlobals = { clubStore: false, club: false };
 
-/** `window.__club` is the game runtime; only `01-boot` is photographed without it. */
-const needsRuntime = (shot: Shot): boolean => shot.name !== '01-boot';
-
-export function isReady(globals: PageGlobals, requiresRuntime: boolean): boolean {
-  return globals.clubStore && (!requiresRuntime || globals.club);
+/**
+ * Every shot waits for both globals — including `01-boot`.
+ *
+ * It used to be the exception, on the reasoning that the boot shot wants the
+ * loading state and so must not wait for the runtime. But its `drive` forces
+ * `setBooting(true, 0.45)`, and `installDevHooks` (which publishes
+ * `window.__club`) runs *after* the runtime's own `setBooting(false, 1)`. Not
+ * waiting therefore raced the real boot: force the flag on at 100 ms, the
+ * runtime clears it at 300 ms, and the picture filed as `01-boot` is the
+ * club. Waiting for `__club` means the flag is set with nothing left to clear
+ * it, so the shot is the boot screen every time. The `expectSelector` below
+ * is what caught this.
+ */
+export function isReady(globals: PageGlobals): boolean {
+  return globals.clubStore && globals.club;
 }
 
 /** The globals this shot needed and did not get, for the failure message. */
-export function missingGlobals(globals: PageGlobals, requiresRuntime: boolean): readonly string[] {
+export function missingGlobals(globals: PageGlobals): readonly string[] {
   const missing: string[] = [];
   if (!globals.clubStore) missing.push('window.__clubStore');
-  if (requiresRuntime && !globals.club) missing.push('window.__club');
+  if (!globals.club) missing.push('window.__club');
   return missing;
 }
 
@@ -254,6 +264,10 @@ function seededSave(lastSeenAt: number): string {
 
 export const SHOTS: readonly Shot[] = [
   {
+    // The flag is forced back on *after* the runtime has finished booting —
+    // see `isReady`. Forcing it while the real boot is still in flight means
+    // the runtime's own `setBooting(false, 1)` clears it again a frame later,
+    // and the file named `01-boot` is a picture of the club.
     name: '01-boot',
     expectSelector: '.boot',
     note: 'boot / loading — club silhouette, spinner, progress bar',
@@ -561,15 +575,12 @@ async function main(): Promise<void> {
 
       await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
 
-      // Wait for the runtime rather than a fixed delay: the boot shot
-      // deliberately catches the loading state, and everything else needs the
-      // canvas up.
+      // Wait for the runtime rather than a fixed delay.
       //
       // When the budget runs out this *throws*. The loop it replaced merely
       // ended, and execution fell through to `drive` and the shutter — which is
       // how a boot splash got written out as `mobile-24-…png`, exit 0, success
       // line printed (DUB-108).
-      const requiresRuntime = needsRuntime(shot);
       const label = `${viewport.name} ${shot.name}`;
       const readyDeadline = Date.now() + READY_BUDGET_MS;
       for (;;) {
@@ -579,11 +590,11 @@ async function main(): Promise<void> {
             `return { clubStore: Boolean(window.__clubStore), club: Boolean(window.__club) };`,
           )
           .catch(() => ABSENT_GLOBALS);
-        if (isReady(globals, requiresRuntime)) break;
+        if (isReady(globals)) break;
         if (Date.now() >= readyDeadline) {
           throw new Error(
             `${label}: never became ready within ${READY_BUDGET_MS} ms — ` +
-              `missing ${missingGlobals(globals, requiresRuntime).join(', ')}. ` +
+              `missing ${missingGlobals(globals).join(', ')}. ` +
               `Nothing captured. Raise SHOT_READY_MS if the dev server is cold, ` +
               `or check that ${BASE_URL}/ actually boots.`,
           );

@@ -14,43 +14,32 @@ import { SHOTS, isReady, missingGlobals, readyBudgetMs } from './screenshots.ts'
  */
 
 describe('readiness predicate', () => {
-  it('needs the store, and the runtime too when the shot is not the boot splash', () => {
-    expect(isReady({ clubStore: true, club: true }, true)).toBe(true);
-    expect(isReady({ clubStore: true, club: false }, true)).toBe(false);
-    expect(isReady({ clubStore: false, club: true }, true)).toBe(false);
-  });
-
-  it('lets the boot shot through on the store alone — it is photographed mid-boot', () => {
-    expect(isReady({ clubStore: true, club: false }, false)).toBe(true);
-  });
-
-  it('never calls a page with no globals ready', () => {
-    expect(isReady({ clubStore: false, club: false }, false)).toBe(false);
+  it('needs both globals, the boot shot included', () => {
+    expect(isReady({ clubStore: true, club: true })).toBe(true);
+    // `window.__club` is published *after* the runtime clears `booting`, so a
+    // boot shot taken before it exists races the real boot and files a picture
+    // of the club under `01-boot`.
+    expect(isReady({ clubStore: true, club: false })).toBe(false);
+    expect(isReady({ clubStore: false, club: true })).toBe(false);
+    expect(isReady({ clubStore: false, club: false })).toBe(false);
   });
 });
 
 describe('missingGlobals', () => {
   it('names what the failure message has to report', () => {
-    expect(missingGlobals({ clubStore: false, club: false }, true)).toEqual([
+    expect(missingGlobals({ clubStore: false, club: false })).toEqual([
       'window.__clubStore',
       'window.__club',
     ]);
-    expect(missingGlobals({ clubStore: true, club: false }, true)).toEqual(['window.__club']);
-  });
-
-  it('does not blame the runtime on a shot that never needed it', () => {
-    expect(missingGlobals({ clubStore: false, club: false }, false)).toEqual(['window.__clubStore']);
+    expect(missingGlobals({ clubStore: true, club: false })).toEqual(['window.__club']);
+    expect(missingGlobals({ clubStore: false, club: true })).toEqual(['window.__clubStore']);
   });
 
   it('is empty exactly when the shot is ready', () => {
-    for (const requiresRuntime of [true, false]) {
-      for (const clubStore of [true, false]) {
-        for (const club of [true, false]) {
-          const globals = { clubStore, club };
-          expect(missingGlobals(globals, requiresRuntime).length === 0).toBe(
-            isReady(globals, requiresRuntime),
-          );
-        }
+    for (const clubStore of [true, false]) {
+      for (const club of [true, false]) {
+        const globals = { clubStore, club };
+        expect(missingGlobals(globals).length === 0).toBe(isReady(globals));
       }
     }
   });
