@@ -80,14 +80,17 @@ export function DoorSheet(): React.JSX.Element {
 
       {/* Same terminal-state rule as the Bars sheet: at Lv 8 "Upgrade to Door
           Lv 8" is literally wrong, so the label states where the door is
-          instead of offering a step it cannot take. */}
+          instead of offering a step it cannot take — and the slot that held the
+          price says the state, not the level over again (DUB-55).
+
+          This row keeps the word "Door" where the Bars rows drop their noun.
+          It is a bare button under the compare block rather than a row inside a
+          named card, so nothing above it names what is finished. */}
       <BuyButton
-        label={
-          doorMaxed ? `Door Lv ${DOOR_MAX} — maxed` : `Upgrade to Door Lv ${doorLevel + 1}`
-        }
+        label={doorMaxed ? `Door Lv ${DOOR_MAX}` : `Upgrade to Door Lv ${doorLevel + 1}`}
         price={formatCash(doorCost ?? 0)}
         affordable={doorCost !== null && cash >= doorCost}
-        doneLabel={doorMaxed ? `Lv ${DOOR_MAX} of ${DOOR_MAX}` : undefined}
+        doneLabel={doorMaxed ? 'Maxed' : undefined}
         accent="cyan"
         onBuy={actions.upgradeDoor}
       />

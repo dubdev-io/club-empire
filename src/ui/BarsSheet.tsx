@@ -129,33 +129,48 @@ function StationRow({ station }: { readonly station: StationView }): React.JSX.E
       <div className="station-row__buys">
         {/* Neither button may read as an action once its axis is finished:
             "Upgrade to Lv 30" at Lv 30, or "+ Lane 3" at three lanes, is
-            literally wrong. So the label states where the axis is and the price
-            slot says how far through it is — the same `Lv 8 of 8` shape the
-            Door sheet uses.
+            literally wrong. So a finished row keeps the live row's two columns
+            and re-fills them: the label still says what you get, and the slot
+            that held the price now says the state.
+
+            That column contract is the whole reason for the shape (DUB-55). A
+            live row is `Upgrade to Lv 8` / `£282` — left is the thing, right is
+            the deal. Saying `Lv 30 — maxed` / `Lv 30 of 30` broke both halves
+            at once: it put the state in the left column, and it put a restated
+            number in the column the player has learned means "what this costs
+            me". `Lv 30` / `MAXED` keeps the mapping, states the level once, and
+            states the terminal word once.
+
+            MAXED is also what the badge was always called — in this file, in
+            `.cta--maxed`, and in `tools/contrast.ts`. It now says so. The copy
+            here is sentence-case and `.cta__done` does the uppercasing, which
+            is how `.door-compare__label` and `.card__title` already work.
 
             The badge deliberately carries no stars. The header two rows up
             already shows ★★★ and the level, and design review asked for one of
             them rather than the same two facts twice within 140 px. */}
         <BuyButton
           label={
-            station.maxed
-              ? `Lv ${MAX_STATION_LEVEL} — maxed`
-              : `Upgrade to Lv ${station.level + 1}`
+            station.maxed ? `Lv ${MAX_STATION_LEVEL}` : `Upgrade to Lv ${station.level + 1}`
           }
           price={formatCash(station.upgradeCost ?? 0)}
           affordable={station.upgradeCost !== null && cash >= station.upgradeCost}
-          doneLabel={station.maxed ? `Lv ${MAX_STATION_LEVEL} of ${MAX_STATION_LEVEL}` : undefined}
+          doneLabel={station.maxed ? 'Maxed' : undefined}
           onBuy={() => actions.upgradeStation(station.key)}
         />
+        {/* The lane count is the one number here that lives nowhere else on the
+            card — the header carries ★★★ and the level, and the flow line
+            carries rates, not lanes. So the finished lane row keeps `3 lanes`
+            rather than dropping to a bare state word. */}
         <BuyButton
           label={
             station.laneCost === null
-              ? `${MAX_LANES} lanes — maxed`
+              ? `${MAX_LANES} lanes`
               : `+ Lane ${Math.min(station.lanes + 1, MAX_LANES)}`
           }
           price={formatCash(station.laneCost ?? 0)}
           affordable={station.laneCost !== null && cash >= station.laneCost}
-          doneLabel={station.laneCost === null ? `${MAX_LANES} of ${MAX_LANES}` : undefined}
+          doneLabel={station.laneCost === null ? 'Maxed' : undefined}
           accent="cyan"
           onBuy={() => actions.buyLane(station.key)}
         />
