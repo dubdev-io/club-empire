@@ -528,6 +528,46 @@ const SHOTS: readonly Shot[] = [
     `,
     settleMs: 1600,
   },
+  {
+    /*
+     * The cell where 23 and 24 cross, and the one neither of them covers.
+     *
+     * 23 is a maxed row pressed at default motion; 24 is the toggle on an
+     * affordable row. On a maxed row under reduced motion two of the three
+     * press signals are gone at once: `cta--still` suppresses the
+     * `scale(0.97)` shrink, and the price flash cannot fire because
+     * `.cta__done` occupies the slot `.cta__price` would. The `#f4f1ff` inset
+     * ring is the only button-local answer to the thumb left standing, so this
+     * is the frame that shows it standing. If it ever went with them, a maxed
+     * row under reduced motion would answer a press with nothing at all — the
+     * §9 failure DUB-38 exists to prevent.
+     *
+     * DUB-42's `cta--maxed` and DUB-49's `cta--still` reach the same button
+     * through the same `ctaClassName` call without either ticket seeing the
+     * other, and the next rebase through that line will not re-shoot this by
+     * itself. That is why it is a shot and not only a unit test.
+     *
+     * `reducedMotion` is left unset deliberately: this is row 1 of the DUB-49
+     * table — toggle `on`, OS preference unset — which CDP media emulation
+     * cannot reach, so the toggle has to be the thing that moves.
+     */
+    name: '26-cta-pressed-maxed-still',
+    note: 'a finger down on a maxed row with reduced motion ON via the toggle — no shrink, no price flash, the inset ring and the gold badge still there (DUB-95 N1)',
+    seed: FRESH,
+    drive: `
+      window.__club.buyAll();
+      const s = window.__clubStore.getState();
+      s.setStar(null);
+      // Same dismissal as 23: buyAll() finishes the club and raises CLUB
+      // COMPLETE over whatever sheet opens next.
+      s.setShowComplete(false);
+      s.openSheet('settings');
+      setTimeout(${TAP_TOGGLE}('Reduced motion'), 300);
+      setTimeout(() => window.__clubStore.getState().openSheet('bars'), 600);
+      setTimeout(${PRESS_CTA}('Lv 30'), 1000);
+    `,
+    settleMs: 1600,
+  },
 ];
 
 // ---------------------------------------------------------------------------
