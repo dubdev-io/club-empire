@@ -166,12 +166,34 @@ function contrast(a: string, b: string): number {
 }
 
 /*
- * `channels`, `composite` and `translucentToken` lived here, to composite the
- * ring and the room under `--scrim` at 72% and measure the 2.27:1 that came out.
- * They went with the test that used them (DUB-72): no stop can be behind the
- * scrim now, so there is no such pair of colours to measure. `git show` has them
- * if the scrim ever needs weighing again.
+ * `translucentToken` lived here, to read `--scrim`'s own alpha out of the tokens
+ * and composite the ring and the room under it at 72% — the 2.27:1 that came out
+ * is what DUB-72 fixed by trapping focus. It went with the test that used it: no
+ * stop can be behind the scrim now, so there is no such pair of colours left to
+ * measure. `git show` has it if the scrim ever needs weighing again.
+ *
+ * `channels` and `composite` stay, because the dim is not the scrim: the DUB-91
+ * test below composites the ring over the card at `opacity: 0.55`, which is a
+ * surface that still exists.
  */
+
+/** `#rrggbb` as its three channels. */
+function channels(hex: string): [number, number, number] {
+  const n = Number.parseInt(/^#([0-9a-f]{6})$/i.exec(hex)![1]!, 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+/** `#rrggbb` again after `over` is painted on top of it at `alpha`. */
+function composite(under: string, over: string, alpha: number): string {
+  const [ur, ug, ub] = channels(under);
+  const [or_, og, ob] = channels(over);
+  const mix = (u: number, o: number): string =>
+    Math.round(u * (1 - alpha) + o * alpha)
+      .toString(16)
+      .padStart(2, '0');
+
+  return `#${mix(ur, or_)}${mix(ug, og)}${mix(ub, ob)}`;
+}
 
 describe('the focus ring token', () => {
   it('exists, once, as tokens rather than as a literal at a call site', () => {
