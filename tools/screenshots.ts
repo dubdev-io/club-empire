@@ -24,14 +24,56 @@
  *
  * So a screenshot that looks right is evidence the path works, not evidence
  * that a component renders.
+ *
+ * And a run that cannot reach a state **fails**. It does not photograph the
+ * boot splash under the state's filename and exit 0 — `screenshots/` is
+ * gitignored, so "the file exists" is the only check a reviewer has on a shot,
+ * and a plausible-looking wrong file defeats it. Two gates enforce that:
+ * `SHOT_READY_MS` for the runtime globals, and a per-shot `expectSelector`
+ * that has to match after the state has been driven.
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { SAVE_STORAGE_KEY } from '../src/save/schema.ts';
 
 const BASE_URL = process.env.CLUB_URL ?? 'http://127.0.0.1:5173';
 const DEBUG_URL = process.env.CLUB_CDP ?? 'http://127.0.0.1:9222';
 const OUT_DIR = process.env.CLUB_SHOTS ?? 'screenshots';
+
+/**
+ * How long a single state may take to boot before the run gives up on it.
+ *
+ * The old budget was a hard-coded 6s, which is a fast-machine number: a cold
+ * `vite dev` server on a loaded container spends longer than that transpiling
+ * the first request alone. Generous by default because the cost of waiting too
+ * long is a slow run, and the cost of waiting too little used to be a silently
+ * wrong screenshot.
+ */
+const READY_BUDGET_MS = readyBudgetMs(process.env.SHOT_READY_MS);
+
+/**
+ * How long the post-drive `expectSelector` check may keep looking.
+ *
+ * Only the failing path pays this: a state that is already on screen matches
+ * on the first poll and the run continues with no added delay. Separate from
+ * `settleMs`, which stays the deliberate "catch it mid-animation" delay.
+ */
+const EXPECT_BUDGET_MS = readyBudgetMs(process.env.SHOT_EXPECT_MS, 5_000);
+
+const POLL_MS = 100;
+
+/** Parse a millisecond budget from the environment, or fall back to `fallback`. */
+export function readyBudgetMs(raw: string | undefined, fallback = 30_000): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  // A typo'd budget must not quietly become `NaN` and make every comparison
+  // false — that is the same class of bug as the loop this replaced.
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`invalid millisecond budget ${JSON.stringify(raw)}: expected a positive number`);
+  }
+  return parsed;
+}
 
 /** The design viewport, and the desktop size that must not be *broken*. */
 const VIEWPORTS = [
@@ -135,6 +177,41 @@ interface Shot {
   readonly reducedMotion?: boolean;
   /** Extra settle time, for states with an animation worth catching. */
   readonly settleMs?: number;
+  /**
+   * A selector that only this state's screen satisfies, checked after `drive`
+   * and `settleMs` and before the shutter.
+   *
+   * **Required, deliberately.** The readiness gate below proves the game
+   * booted; it cannot prove the shot reached the state it is named after. The
+   * boot splash passes a readiness check — it does not have a `[role="dialog"]`
+   * in it. Making this non-optional means the next state added to this list
+   * cannot skip the one check that catches a wrong picture, because `tsc`
+   * refuses the entry.
+   */
+  readonly expectSelector: string;
+}
+
+/** The page globals the driver waits on. Reported by name when they never arrive. */
+interface PageGlobals {
+  readonly clubStore: boolean;
+  readonly club: boolean;
+}
+
+const ABSENT_GLOBALS: PageGlobals = { clubStore: false, club: false };
+
+/** `window.__club` is the game runtime; only `01-boot` is photographed without it. */
+const needsRuntime = (shot: Shot): boolean => shot.name !== '01-boot';
+
+export function isReady(globals: PageGlobals, requiresRuntime: boolean): boolean {
+  return globals.clubStore && (!requiresRuntime || globals.club);
+}
+
+/** The globals this shot needed and did not get, for the failure message. */
+export function missingGlobals(globals: PageGlobals, requiresRuntime: boolean): readonly string[] {
+  const missing: string[] = [];
+  if (!globals.clubStore) missing.push('window.__clubStore');
+  if (requiresRuntime && !globals.club) missing.push('window.__club');
+  return missing;
 }
 
 const FRESH = `localStorage.removeItem(${JSON.stringify(SAVE_STORAGE_KEY)});`;
@@ -175,21 +252,24 @@ function seededSave(lastSeenAt: number): string {
   )});`;
 }
 
-const SHOTS: readonly Shot[] = [
+export const SHOTS: readonly Shot[] = [
   {
     name: '01-boot',
+    expectSelector: '.boot',
     note: 'boot / loading — club silhouette, spinner, progress bar',
     seed: FRESH,
     drive: `window.__clubStore.getState().setBooting(true, 0.45);`,
   },
   {
     name: '02-first-run',
+    expectSelector: '.hud',
     note: 'first run — empty club, pulsing ring on the first cash bubble, no modal',
     seed: FRESH,
     settleMs: 1400,
   },
   {
     name: '03-playing',
+    expectSelector: '.hud__cash',
     note: 'playing — a club part-way through, bubbles on the floor, Last Call part-filled',
     seed: FRESH,
     drive: `
@@ -205,6 +285,7 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '04-queue-overflow',
+    expectSelector: '.queue-warning',
     note: 'queue overflow — Door raised without lanes: queue at the door, warning banner, DOOR badge',
     seed: FRESH,
     drive: `window.__club.floodDoor();`,
@@ -212,6 +293,7 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '05-bars-sheet',
+    expectSelector: '[role="dialog"][aria-label="Bars"]',
     note: 'BARS sheet — level and lane per station, served-vs-capacity, ★ progress',
     seed: FRESH,
     drive: `
@@ -229,6 +311,7 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '06-door-sheet',
+    expectSelector: '[role="dialog"][aria-label="Door"]',
     note: 'DOOR sheet — arrivals vs capacity, the min() made legible',
     seed: FRESH,
     drive: `window.__club.floodDoor(); window.__clubStore.getState().openSheet('door');`,
@@ -236,6 +319,7 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '07-station-maxed',
+    expectSelector: '[role="dialog"][aria-label="Bars"]',
     note: 'station maxed — Tap Bar at L30 ★★★, MAXED badge, attention moves on',
     seed: FRESH,
     drive: `
@@ -248,6 +332,7 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '08-star-celebration',
+    expectSelector: '.star-burst',
     note: '★ celebration — ×2 drink price, flash and confetti, auto-dismissing',
     seed: FRESH,
     drive: `
@@ -259,18 +344,21 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '09-offline-return',
+    expectSelector: '[role="dialog"][aria-labelledby="offline-title"]',
     note: 'offline return — "the night carried on", capped at 10 min, COLLECT in the thumb zone',
     seed: seededSave(Date.now() - 2 * 3600_000 - 14 * 60_000),
     settleMs: 1100,
   },
   {
     name: '10-save-corrupt',
+    expectSelector: '.banner--warn',
     note: 'save corrupt — readable banner and [Start fresh], never a white screen',
     seed: `localStorage.setItem(${JSON.stringify(SAVE_STORAGE_KEY)}, '{"version":3,"lastSeen');`,
     settleMs: 1100,
   },
   {
     name: '11-club-complete',
+    expectSelector: '[role="dialog"][aria-labelledby="complete-title"]',
     note: 'club complete — stats, ★★★, "Phase 2: a second venue", [KEEP PLAYING]',
     seed: FRESH,
     drive: `window.__club.buyAll(); window.__clubStore.getState().setStar(null);`,
@@ -278,6 +366,7 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '12-settings-audio-off',
+    expectSelector: '[role="dialog"][aria-label="Settings"]',
     note: 'settings / audio off — the only two toggles in scope, plus a two-step reset',
     seed: FRESH,
     drive: `
@@ -289,6 +378,7 @@ const SHOTS: readonly Shot[] = [
   },
   {
     name: '13-reduced-motion',
+    expectSelector: '.star-burst--still',
     note: 'reduced motion — the ★ celebration as a static flash and a number, feedback not removed',
     seed: FRESH,
     reducedMotion: true,
@@ -307,6 +397,7 @@ const SHOTS: readonly Shot[] = [
     // `unlockCost` is already `null`. Captured because the fix has to be looked
     // at, not reasoned about.
     name: '14-door-dead-end',
+    expectSelector: '[role="dialog"][aria-label="Door"]',
     note: 'DOOR sheet dead end — every lane bought, levels mid-run, and it still says "more lanes"',
     seed: FRESH,
     drive: `
@@ -331,6 +422,7 @@ const SHOTS: readonly Shot[] = [
     // so the sheet is readable. This is the state the player is left in
     // forever, so it is the one the end-state copy has to be judged on.
     name: '15-door-full-buildout',
+    expectSelector: '[role="dialog"][aria-label="Door"]',
     note: 'DOOR sheet after club complete — the permanent 0.06/s residual, nothing left to buy',
     seed: FRESH,
     drive: `
@@ -349,6 +441,7 @@ const SHOTS: readonly Shot[] = [
     // "3 LANES". Reachable mid-run, which is why it is captured apart from the
     // full build-out shot below.
     name: '16-bars-dead-end',
+    expectSelector: '[role="dialog"][aria-label="Bars"]',
     note: 'BARS sheet dead end — every lane bought, levels mid-run, no lane left to advise',
     seed: FRESH,
     drive: `
@@ -374,6 +467,7 @@ const SHOTS: readonly Shot[] = [
     // because it is the one state that proves the Bars sheet no longer puts
     // three amber warnings behind the CLUB COMPLETE card.
     name: '17-bars-full-buildout',
+    expectSelector: '[role="dialog"][aria-label="Bars"]',
     note: 'BARS sheet after club complete — three terminal cards, no ⚠ and no imperative',
     seed: FRESH,
     drive: `
@@ -393,6 +487,7 @@ const SHOTS: readonly Shot[] = [
     // lane, opens the sheet, and buys it — leaving the card over the finished
     // room rather than over a list of rows.
     name: '18-complete-over-sheet',
+    expectSelector: '[role="dialog"][aria-labelledby="complete-title"]',
     note: 'club complete fired from the BARS sheet — the real last purchase, sheet dismissed',
     seed: FRESH,
     drive: `
@@ -469,19 +564,55 @@ async function main(): Promise<void> {
       // Wait for the runtime rather than a fixed delay: the boot shot
       // deliberately catches the loading state, and everything else needs the
       // canvas up.
-      const needsRuntime = shot.name !== '01-boot';
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        await sleep(100);
-        const ready = await cdp
-          .evaluate<boolean>(
-            `return Boolean(window.__clubStore) && (${String(!needsRuntime)} || Boolean(window.__club));`,
+      //
+      // When the budget runs out this *throws*. The loop it replaced merely
+      // ended, and execution fell through to `drive` and the shutter — which is
+      // how a boot splash got written out as `mobile-24-…png`, exit 0, success
+      // line printed (DUB-108).
+      const requiresRuntime = needsRuntime(shot);
+      const label = `${viewport.name} ${shot.name}`;
+      const readyDeadline = Date.now() + READY_BUDGET_MS;
+      for (;;) {
+        await sleep(POLL_MS);
+        const globals = await cdp
+          .evaluate<PageGlobals>(
+            `return { clubStore: Boolean(window.__clubStore), club: Boolean(window.__club) };`,
           )
-          .catch(() => false);
-        if (ready) break;
+          .catch(() => ABSENT_GLOBALS);
+        if (isReady(globals, requiresRuntime)) break;
+        if (Date.now() >= readyDeadline) {
+          throw new Error(
+            `${label}: never became ready within ${READY_BUDGET_MS} ms — ` +
+              `missing ${missingGlobals(globals, requiresRuntime).join(', ')}. ` +
+              `Nothing captured. Raise SHOT_READY_MS if the dev server is cold, ` +
+              `or check that ${BASE_URL}/ actually boots.`,
+          );
+        }
       }
 
       if (shot.drive !== undefined) await cdp.evaluate(`${shot.drive} return true;`);
       await sleep(shot.settleMs ?? 400);
+
+      // The readiness gate proves the game booted. This proves the shot is of
+      // the state it is named after: a splash satisfies the former and fails
+      // the latter.
+      const expectDeadline = Date.now() + EXPECT_BUDGET_MS;
+      for (;;) {
+        const present = await cdp
+          .evaluate<boolean>(
+            `return document.querySelector(${JSON.stringify(shot.expectSelector)}) !== null;`,
+          )
+          .catch(() => false);
+        if (present) break;
+        if (Date.now() >= expectDeadline) {
+          throw new Error(
+            `${label}: nothing matched ${shot.expectSelector} after drive + ` +
+              `${String(shot.settleMs ?? 400)} ms settle + ${EXPECT_BUDGET_MS} ms wait. ` +
+              `Nothing captured — the page is not showing this state.`,
+          );
+        }
+        await sleep(POLL_MS);
+      }
 
       const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', {
         format: 'png',
@@ -500,7 +631,16 @@ async function main(): Promise<void> {
   console.log(`\n${manifest.length} screenshots in ${OUT_DIR}/`);
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exit(1);
-});
+/**
+ * Only drive a browser when this file *is* the command.
+ *
+ * `screenshots.test.ts` imports `SHOTS` and the gate helpers; without this
+ * guard the import would try to open a CDP socket from inside vitest.
+ */
+const entry = process.argv[1];
+if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
