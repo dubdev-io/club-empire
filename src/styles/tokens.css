@@ -95,6 +95,68 @@
      column that only just fits is one that wraps on the next copy change. */
   --rotate-column-min: 280px;
 
+  /* --- focus ring (DUB-50) -------------------------------------------- */
+  /*
+   * The keyboard's "you are here", and the one treatment that must not be
+   * confusable with the DUB-38 press.
+   *
+   * Geometry carries that distinction, not hue: the press is a 2px ring *inset*
+   * into the button (`box-shadow: inset 0 0 0 2px var(--ink-primary)`), and this
+   * is an `outline` sitting *outside* it. A button that is focused and held at
+   * once therefore reads white, then `--focus-ring-offset` of the card colour,
+   * then white again — two rings with a gap, not one thick band. `outline` also
+   * sits outside the layout box, so unlike a wider `border` it cannot shove the
+   * label and the price sideways.
+   *
+   * The row that proves it is the *maxed* one, under reduced motion, and it has
+   * to be that row: a press is normally answered on three channels at once, and
+   * a maxed row has only the ring left — `.cta__done` sits where the price would
+   * be so there is no flash, and the reduced-motion block drops the scale. On
+   * any other row "focused and held look different" would pass for reasons that
+   * are not the ring's doing. Measured by `npm run audit:states`, at 1440x900:
+   *
+   *   focused vs pressed            4918 px differ
+   *   focused vs focused+pressed    2379 px differ
+   *   pressed vs focused+pressed    2540 px differ
+   *
+   * and the channels are additive, which is the signature of two axes rather
+   * than one: focus alone moves 2540 px, press alone 2378, both together 4918 —
+   * their sum. Put the focus ring on the press's own axis instead (`box-shadow:
+   * inset`, which is what the next engineer reaches for) and `focused` vs
+   * `focused+pressed` measures **0 px**: the identical render, on the one pair a
+   * keyboard player most needs to tell apart. That is a reproducible mutation
+   * rather than a worry, and `audit:states` exits non-zero on it.
+   *
+   * Contrast, measured against the three *opaque* surfaces a ring lands on:
+   * `--ink-primary` is 14.2:1 on `--bg-raised` (the station card), 16.1:1 on
+   * `--bg-surface` (the sheet) and 17.7:1 on `--bg-room` — all far past the 3:1
+   * WCAG 1.4.11 asks of a non-text indicator. The accent *fills* are the hard
+   * surface (the same white is 1.4:1 on `--neon-cyan`), which is why a non-zero
+   * offset is mandatory rather than decorative: it keeps the ring on the card
+   * and off the fill, so the fill's colour never enters the measurement.
+   *
+   * One surface those three numbers do not cover, and it fails: a ring drawn
+   * *under* `--scrim` composites to ~2.3:1, because the scrim darkens the ring
+   * and not only what is behind it. That is what the three bottom-bar buttons
+   * get, because they stay in the tab ring while a sheet is open — a dialog
+   * with no focus trap. No ring colour fixes it (nothing lighter than L 0.265
+   * clears 3:1 there), so it is not this token's problem to solve:
+   * `focusRing.test.ts` pins the number and DUB-72 removes the case.
+   *
+   * Width plus offset is how far the ring reaches past the element's edge, and
+   * 2.4.11 (focus not obscured) makes that a budget rather than a free choice.
+   * The tightest container in the game is `.bottom-bar` — 8 px of padding above
+   * the three bar buttons — so the reach has to stay under that, which is why
+   * the offset is 3px and not `--space-1`. `focusRing.test.ts` holds it there.
+   */
+  --focus-ring-width: 3px;
+  --focus-ring-offset: 3px;
+  --focus-ring-color: var(--ink-primary);
+  /* Derived, so the reach is never written twice. Scroll containers use it as
+     `scroll-padding`, so scrolling a focused control into view cannot park it
+     flush against a clipping edge with its ring outside. */
+  --focus-ring-reach: calc(var(--focus-ring-width) + var(--focus-ring-offset));
+
   /* --- device safe area ----------------------------------------------- */
   /* CSS writes the four insets into custom properties so JS can read them
      back as numbers (see src/render/safeArea.ts). */
