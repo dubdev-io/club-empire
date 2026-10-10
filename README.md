@@ -91,10 +91,19 @@ Rate alone does not decide the outcome — whether the boot screen mounted befor
 or after the threshold does — so run a few repeats:
 `CLUB_BOOT_REPEATS=3 npm run measure:boot -- 10`.
 
-It exits `1` on a load that was owed a bar and did not have one, and `3` when it
-measured nothing at all: no load still booting at the threshold, or no boot
-screen on the page. An instrument with no opinion must not report a pass, which
-is the false green both earlier versions of this tool managed to produce.
+It exits `1` on a load that was owed a bar and did not have one, and `3` on a
+load it could not read at all — no boot screen on the page, or none still up at
+the threshold. An instrument with no opinion must not report a pass, which is
+the false green both earlier versions of this tool managed to produce. The
+summary says which: `FAIL` is a broken bar, `INCOMPLETE` is a run that measured
+some loads and could not read others, `NO MEASUREMENT` is one that read none.
+
+On a loaded host the default wait budget — `max(5 s, 1 s × rate)` — can expire
+before a load has booted, which reports `no-boot` and fails the run rather than
+guessing. That is the intended behaviour, and the fix is to give it more room:
+`CLUB_BOOT_WAIT_MS=20000`. Checking the throttle is honest is worth it too; at
+load averages in the teens the rate Chrome actually applies drifts well below
+the one asked for, so prefer a quiet box for a figure you intend to quote.
 
 `shots`, `measure:frames` and `measure:contrast` need a dev server and a headless
 Chrome with remote debugging:

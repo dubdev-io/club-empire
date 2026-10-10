@@ -121,6 +121,19 @@ interface Timeline {
   samples: Sample[];
   events: { t: number; name: string }[];
   longTasks: { start: number; dur: number }[];
+  /**
+   * When the probe last wrote its record, and what was on the page then.
+   *
+   * The honest end of a boot window that never closed. `samples.at(-1).t` cannot
+   * play that role: it is a `requestAnimationFrame` timestamp, so on the blocked
+   * thread this tool exists to measure it stops advancing while the boot screen
+   * is still up — and a window that ends at the last frame is a window that ends
+   * when the evidence ran out rather than when the thing did. Written from
+   * `pagehide`, an event-loop task that runs when the driver navigates away, so
+   * it lands at the end of the wait budget however little the thread yielded.
+   */
+  savedAt?: number;
+  fallbackAtSave?: boolean;
 }
 
 interface RunReport {
@@ -138,7 +151,7 @@ interface RunReport {
   /** Of those, frames where the bar was in the DOM but fully transparent. */
   missingPaint: number;
   busyMsAfterGate: number;
-  /** `#boot-fallback` was still on the page at the last sample. */
+  /** `#boot-fallback` was still on the page when the probe wrote its record. */
   fallbackStuck: boolean;
   /**
    * `pass`/`fail` are verdicts. The other two are not:
@@ -210,6 +223,10 @@ const PROBE = `
   };
 
   const save = () => {
+    // Stamped here, not read off the last frame: this is the one clock in the
+    // probe that a blocked main thread cannot stop. See \`Timeline.savedAt\`.
+    timeline.savedAt = Math.round(performance.now());
+    timeline.fallbackAtSave = Boolean(document.querySelector('#boot-fallback'));
     try { localStorage.setItem('__clubBootTimeline', JSON.stringify(timeline)); } catch {}
   };
 
@@ -279,23 +296,35 @@ function busyAfterGate(timeline: Timeline, from: number, to: number): number {
  * which runs as a microtask of whichever task did the mutating and therefore
  * cannot be starved into silence.
  */
-function report(rate: number, repeat: number, timeline: Timeline): RunReport {
+export function report(rate: number, repeat: number, timeline: Timeline): RunReport {
   const at = (name: string): number | null => timeline.events.find((e) => e.name === name)?.t ?? null;
   const bootFrom = at('boot-mount');
   const bootTo = at('boot-unmount');
   const barFrom = at('bar-in-dom');
   const barTo = at('bar-out-of-dom');
-  const last = timeline.samples.at(-1)?.t ?? GATE_MS;
+
+  // When observation stopped. `savedAt` first and the last frame only as a
+  // fallback: a boot screen that never unmounted was up until the probe was
+  // navigated away from, not until the last frame it managed to sample. Scoring
+  // it off frames made a 20 s boot window read `owed 0 ms, n/a` — measured here,
+  // 20x CPU, `.boot` up from 620 and never unmounted, frames stopping near the
+  // threshold. `n/a` is not a measurement, so a *missing* bar on that path would
+  // have been dropped from the tally instead of failing it. That is this
+  // ticket's own defect wearing the instrument's clothes.
+  const observedTo = timeline.savedAt ?? timeline.samples.at(-1)?.t ?? GATE_MS;
 
   // A boot that ended before the threshold is owed nothing, and a bar there
   // would be the defect rather than the fix.
   const owedFrom = Math.max(GATE_MS, bootFrom ?? GATE_MS);
-  const owedTo = bootTo ?? last;
+  const owedTo = bootTo ?? observedTo;
   const owedMs = bootFrom === null ? 0 : Math.max(0, owedTo - owedFrom);
 
-  // The bar's own window, clipped to the window it was owed in.
+  // The bar's own window, clipped to the window it was owed in. Its end takes
+  // the same clock for the same reason — and the edges themselves are safe
+  // either way, because a `MutationObserver` runs as a microtask of whichever
+  // task mutated the DOM and so cannot be starved into silence.
   const barWindowFrom = barFrom ?? Number.POSITIVE_INFINITY;
-  const barWindowTo = barTo ?? last;
+  const barWindowTo = barTo ?? observedTo;
   const covered = Math.max(
     0,
     Math.min(owedTo, barWindowTo) - Math.max(owedFrom, barWindowFrom),
@@ -319,7 +348,10 @@ function report(rate: number, repeat: number, timeline: Timeline): RunReport {
     samples: owedSamples.length,
     missingPaint,
     busyMsAfterGate: busyAfterGate(timeline, bootFrom ?? 0, owedTo),
-    fallbackStuck: timeline.samples.at(-1)?.fallback === true,
+    // Same clock again: this drives the "the bundle never executed" diagnosis,
+    // and reading it off the last frame makes it a claim about when the frames
+    // stopped rather than about what was on the page at the end.
+    fallbackStuck: (timeline.fallbackAtSave ?? timeline.samples.at(-1)?.fallback) === true,
     verdict:
       // `.boot` never in the DOM is not a boot that was too fast to need a bar.
       // It is a page that did not run our bundle, and the instrument has to be
@@ -357,6 +389,27 @@ export function tally(reports: readonly RunReport[]): {
   return { failures, unbooted, overdue, code };
 }
 
+/**
+ * The word the summary leads with.
+ *
+ * Separate from `tally` because the exit code and the sentence answer different
+ * questions, and conflating them produced a third wrong summary: a run of four
+ * measured passes and one unreadable load exits 3 — correctly, an unreadable
+ * load is not absorbed by its neighbours — but printing `NO MEASUREMENT` over
+ * "4 of 12 loads were still booting at the threshold" contradicts the table
+ * directly above it. `INCOMPLETE` is the honest word for a run that measured
+ * something and could not measure all of it; `NO MEASUREMENT` is reserved for a
+ * run that measured nothing, which is a different thing to go and fix.
+ */
+export function headlineFor(
+  reports: readonly RunReport[],
+): 'PASS' | 'FAIL' | 'INCOMPLETE' | 'NO MEASUREMENT' {
+  const { failures, overdue, code } = tally(reports);
+  if (code === 0) return 'PASS';
+  if (failures.length > 0) return 'FAIL';
+  return overdue.length > 0 ? 'INCOMPLETE' : 'NO MEASUREMENT';
+}
+
 async function measure(cdp: Cdp, rate: number, repeat: number): Promise<RunReport> {
   // Unthrottled quiet page: clearing here rather than on the measured load keeps
   // a previous run's save (and its offline card) out of the boot path.
@@ -379,8 +432,15 @@ async function measure(cdp: Cdp, rate: number, repeat: number): Promise<RunRepor
   await cdp.send('Page.navigate', { url: `${BASE_URL}/` });
   await sleep(waitMsFor(rate));
 
-  await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: probe.identifier });
+  // Throttle off *before* the bookkeeping call, not after. By now the game owns
+  // the main thread, and asking a renderer that is both throttled and busy to
+  // acknowledge anything is how a run dies of its own measurement: on a loaded
+  // box this exact call sat for the full 180 s CDP budget and took the run with
+  // it. Still before the navigate, though — the probe has to be gone before the
+  // next document exists, or the quiet page installs it and files its own fast
+  // timeline over the measured one.
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: probe.identifier });
 
   // Read from a fresh page, not from the measured one: the game owns the main
   // thread by now and a `Runtime.evaluate` against it waits tens of seconds.
@@ -453,10 +513,10 @@ async function main(): Promise<void> {
   // not — "0 of 8 loads were still booting at the threshold" is the shape of the
   // false green this tool shipped twice, and it should not be the first thing a
   // reader has to interpret.
-  const headline = code === 0 ? 'PASS' : failures.length > 0 ? 'FAIL' : 'NO MEASUREMENT';
   const summary =
-    `  ${headline} — ${overdue.length} of ${reports.length} loads were still booting ` +
-    `at the threshold; ${failures.length} failed.`;
+    `  ${headlineFor(reports)} — ${overdue.length} of ${reports.length} loads were still ` +
+    `booting at the threshold; ${failures.length} failed` +
+    `${unbooted.length > 0 ? `; ${unbooted.length} unreadable` : ''}.`;
   if (code === 0) console.log(summary);
   else console.error(summary);
   console.log('  owed/missing are ms of the boot screen past the threshold, not frame counts:');
