@@ -87,8 +87,32 @@ const REVIEW_VIEWPORTS = ['mobile', 'desktop'] as const;
  * `useLandscape` goes through a `matchMedia` change event into React state, so
  * the prompt is a render behind the metrics override; and the glyph's own 2s
  * loop needs a moment to be running rather than at its first frame.
+ *
+ * It does not decide *which* frame of that loop gets photographed — see
+ * `MID_TURN_MS`. Tuning this number should never change what a shot shows.
  */
 const TURN_SETTLE_MS = 700;
+
+/**
+ * Where on `rotate-hint`'s 2s loop the moving glyph is photographed.
+ *
+ * The loop is mostly dwell. Resolved angle against `currentTime`, measured in
+ * the page:
+ *
+ *   900=90  940=82  960=69  980=55  1000=45  1050=28  1200=6  1300=1  1400=0
+ *
+ * So ~900ms of every 2000 sit at 90° and the ~700ms from 1300 on sit at ~0° —
+ * 1600ms of the loop is one of two *static* poses, and the 0° one is
+ * pixel-identical to the frozen pose `27-rotate-prompt-still` exists to hold.
+ * Settling into an arbitrary frame and hoping is how the pair ends up as two
+ * photographs of the same thing with the run still green (bump
+ * `TURN_SETTLE_MS` to 1600 and that is exactly what happens).
+ *
+ * 1000ms is the middle of the ~160ms band that renders a pose no static state
+ * can be in: the glyph caught mid-turn, which is the only thing that reads as
+ * *moving* in a still image.
+ */
+const MID_TURN_MS = 1000;
 
 // ---------------------------------------------------------------------------
 // The states
@@ -118,9 +142,14 @@ interface Shot {
    *
    * Only worth it where the thing being photographed is hard to read *off* the
    * photograph. A frozen glyph and a glyph caught at 0° on its way round look
-   * identical in a PNG, so `26-rotate-prompt-still` would pass silently if the
+   * identical in a PNG, so `27-rotate-prompt-still` would pass silently if the
    * fix regressed — the one shot whose whole job is to show the fix. Reading
    * `animationPlayState` is what makes it a check rather than a picture.
+   *
+   * It runs *before* the capture and anything still animating keeps moving in
+   * between, so a value it only reads is the value at assert time, not the one
+   * in the file. A shot that needs those to be the same number has to stop the
+   * clock here — see `26-rotate-prompt`.
    */
   readonly expect?: string;
 }
@@ -635,20 +664,42 @@ const SHOTS: readonly Shot[] = [
      * stylesheet: there was nothing to look at.
      *
      * Default settings and no OS preference, so this is the glyph doing what it
-     * is supposed to do — `rotate-hint`, running. It is the baseline shot 26 is
+     * is supposed to do — `rotate-hint`, running. It is the baseline shot 27 is
      * read against, and the only one of the pair that shows the animation the
      * ticket is about.
+     *
+     * Which is why it does not photograph whatever frame the loop happens to be
+     * on. `expect` asserts the animation is live and then pins the frame at
+     * `MID_TURN_MS`: most of the loop is a static pose, one of those poses is
+     * the frozen pose of shot 27, and a pair of identical PNGs is the exact
+     * silent pass `expect` was added to close.
      */
-    name: '25-rotate-prompt',
-    note: 'rotate prompt at 844x390 — a 390x844 phone turned, default settings: glyph leaning and animating',
+    name: '26-rotate-prompt',
+    note: 'rotate prompt at 844x390 — a 390x844 phone turned, default settings: glyph caught mid-turn, animating',
     seed: FRESH,
     viewports: ['landscape'],
-    settleMs: 400,
     expect: `
       const g = ${READ_GLYPH}();
       if (g.animation !== 'rotate-hint') throw new Error('glyph is not animating: ' + g.animation);
       if (g.playState !== 'running') throw new Error('glyph animation is ' + g.playState);
-      return 'glyph ' + g.animation + '/' + g.playState + ' at ' + g.degrees + 'deg, root "' + g.root + '", ' + g.viewport;
+
+      // Live is asserted above; now stop the clock, so the angle in the file is
+      // the angle this line chose rather than the angle the loop drifts to
+      // between here and the shutter. Pause first, then seek: a running
+      // animation advances between the two statements.
+      const anim = document.querySelector('.fatal__rotate-glyph').getAnimations()[0];
+      if (!anim) throw new Error('glyph has no animation object to pin');
+      anim.pause();
+      anim.currentTime = ${MID_TURN_MS};
+
+      const pinned = ${READ_GLYPH}();
+      if (pinned.degrees < 20 || pinned.degrees > 70) {
+        throw new Error('pinned frame is not mid-turn: ' + pinned.degrees + 'deg');
+      }
+      // anim.playState, not the computed animation-play-state: pausing through
+      // the Web Animations API does not touch the CSS property, so the computed
+      // value still reads "running" on an animation that has stopped.
+      return 'glyph ' + g.animation + '/' + g.playState + ', pinned mid-turn at ' + pinned.degrees + 'deg (currentTime ${MID_TURN_MS}ms, ' + anim.playState + '), root "' + pinned.root + '", ' + pinned.viewport;
     `,
   },
   {
@@ -664,10 +715,10 @@ const SHOTS: readonly Shot[] = [
      * Settings at 390x844, *then* the phone turned. The sheet does not exist at
      * 844x390 — `App.tsx` returns the prompt above the whole HUD — so there is
      * no turning first and tapping after. `reducedMotion` is left unemulated on
-     * purpose, for the same reason shot 23 leaves it: emulating the media query
+     * purpose, for the same reason shot 24 leaves it: emulating the media query
      * would answer for the toggle and prove nothing about it.
      */
-    name: '26-rotate-prompt-still',
+    name: '27-rotate-prompt-still',
     note: 'rotate prompt with reduced motion ON through the Settings toggle, OS preference unset — glyph frozen upright, the DUB-49 fix (DUB-89)',
     seed: FRESH,
     viewports: ['landscape'],
