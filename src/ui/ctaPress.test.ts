@@ -54,6 +54,7 @@ describe('ctaClassName', () => {
       inactive: false,
       maxed: false,
       pressed: true,
+      still: false,
     });
 
     expect(classes.split(' ')[0]).toBe('cta');
@@ -65,7 +66,14 @@ describe('ctaClassName', () => {
 
   it('fills a button whose tap buys something', () => {
     expect(
-      ctaClassName({ accent: 'magenta', affordable: true, inactive: false, maxed: false, pressed: false }),
+      ctaClassName({
+        accent: 'magenta',
+        affordable: true,
+        inactive: false,
+        maxed: false,
+        pressed: false,
+        still: false,
+      }),
     ).toBe('cta cta--magenta cta--affordable');
   });
 
@@ -76,6 +84,7 @@ describe('ctaClassName', () => {
       inactive: false,
       maxed: false,
       pressed: false,
+      still: false,
     });
     const maxed = ctaClassName({
       accent: 'cyan',
@@ -83,6 +92,7 @@ describe('ctaClassName', () => {
       inactive: true,
       maxed: true,
       pressed: false,
+      still: false,
     });
     const switchedOff = ctaClassName({
       accent: 'cyan',
@@ -90,6 +100,7 @@ describe('ctaClassName', () => {
       inactive: true,
       maxed: false,
       pressed: false,
+      still: false,
     });
 
     expect(unaffordable).not.toContain('cta--affordable');
@@ -99,10 +110,24 @@ describe('ctaClassName', () => {
 
   it('marks the press on a dead-end button too — that is the tap that had no answer', () => {
     expect(
-      ctaClassName({ accent: 'cyan', affordable: false, inactive: false, maxed: false, pressed: true }),
+      ctaClassName({
+        accent: 'cyan',
+        affordable: false,
+        inactive: false,
+        maxed: false,
+        pressed: true,
+        still: false,
+      }),
     ).toBe('cta cta--cyan cta--pressed');
     expect(
-      ctaClassName({ accent: 'magenta', affordable: true, inactive: true, maxed: false, pressed: true }),
+      ctaClassName({
+        accent: 'magenta',
+        affordable: true,
+        inactive: true,
+        maxed: false,
+        pressed: true,
+        still: false,
+      }),
     ).toBe('cta cta--magenta cta--pressed');
   });
 
@@ -119,7 +144,14 @@ describe('ctaClassName', () => {
    */
   it('puts cta--maxed on a maxed row, so the dim moves to the label and the badge clears AA (DUB-42)', () => {
     expect(
-      ctaClassName({ accent: 'magenta', affordable: false, inactive: true, maxed: true, pressed: false }),
+      ctaClassName({
+        accent: 'magenta',
+        affordable: false,
+        inactive: true,
+        maxed: true,
+        pressed: false,
+        still: false,
+      }),
     ).toBe('cta cta--magenta cta--maxed');
   });
 
@@ -128,7 +160,14 @@ describe('ctaClassName', () => {
     // and a `disabled` row still shows a price, not a `--gold-vip` badge, so it
     // has no child that needs the dim moved off it.
     expect(
-      ctaClassName({ accent: 'cyan', affordable: true, inactive: true, maxed: false, pressed: false }),
+      ctaClassName({
+        accent: 'cyan',
+        affordable: true,
+        inactive: true,
+        maxed: false,
+        pressed: false,
+        still: false,
+      }),
     ).not.toContain('cta--maxed');
   });
 
@@ -141,6 +180,7 @@ describe('ctaClassName', () => {
       inactive: true,
       maxed: true,
       pressed: true,
+      still: false,
     });
 
     expect(classes).toContain('cta--maxed');
@@ -189,16 +229,24 @@ describe('the pressed rule in ui.css', () => {
   });
 
   it('drops the movement under reduced motion but keeps the feedback', () => {
+    // Both paths: the resolved flag (`.cta--still`, set from the store) and the
+    // first-paint media fallback. *Which signal* each one listens to is pinned
+    // in `reducedMotionSource.test.ts` (DUB-49). What matters here is that
+    // neither takes the ring or the price away along with the scale.
+    const still = block('.cta.cta--still.cta--pressed,');
+
     const reduced = css.slice(css.indexOf('.cta.cta--pressed,\n.cta:active {'));
     const query = reduced.slice(reduced.indexOf('@media (prefers-reduced-motion: reduce)'));
-    const body = query.slice(0, query.indexOf('\n}\n'));
+    const fallback = query.slice(0, query.indexOf('\n}\n'));
 
-    expect(body).toContain('.cta.cta--pressed');
-    expect(body).toContain('transform: none');
-    // The ring and the price colour are not motion and must survive.
-    expect(body).not.toContain('box-shadow');
-    expect(body).not.toContain('border-color');
-    expect(body).not.toContain('color: var(--ink-primary)');
+    expect(fallback).toContain('.cta.cta--pressed');
+    for (const body of [still, fallback]) {
+      expect(body).toContain('transform: none');
+      // The ring and the price colour are not motion and must survive.
+      expect(body).not.toContain('box-shadow');
+      expect(body).not.toContain('border-color');
+      expect(body).not.toContain('color: var(--ink-primary)');
+    }
   });
 });
 

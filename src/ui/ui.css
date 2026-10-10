@@ -9,6 +9,49 @@
  * reserved-width `ch` measurements, each commented where it appears.
  */
 
+/* =========================================================================
+   Motion — one resolved source, read two ways (DUB-49)
+   =========================================================================
+
+   Reduced motion is resolved exactly once, in `motion.ts`: the OS
+   `prefers-reduced-motion` query composed with the three-state Settings
+   toggle (`auto | on | off`). The answer lands in `store.reducedMotion`, and
+   `App.tsx` publishes it to `<html>` as one of two classes:
+
+     html.is-still    motion is suppressed
+     html.is-moving   motion is allowed — explicitly, not by default
+
+   Anything in this file that suppresses motion must key off that resolution,
+   either through a root class or through a component flag that reads the same
+   store value (`.meter--still`, `.star-burst--still`, `.cta--still`). The
+   component flags are used where the element already renders a class list; the
+   root classes carry what no component renders one for — the two entrance
+   animations, `.sheet` and `.card`, and the rotate prompt's glyph.
+
+   A bare `@media (prefers-reduced-motion: reduce)` is *not* that resolution:
+   it cannot see the toggle, so on its own it ignores the player's explicit
+   choice in both directions. The media query is still worth keeping as the
+   first-paint path, before the store has resolved and for a player who never
+   opens Settings — so each block below is scoped `html:not(.is-moving)`. That
+   scope is the whole trick: with neither class on the element the OS
+   preference carries alone, and the moment the store resolves to "motion is
+   fine" the fallback stands down instead of overruling it.
+
+   One exception, deliberate: `.boot__spinner` stays OS-only. It runs before the
+   saved preference has been read, so the store cannot speak for it yet, and the
+   media query does not *stop* it either way — it only slows it from 900ms to
+   2.4s. There is nothing for the toggle to be heard about.
+
+   `.fatal__rotate-glyph` is *not* an exception (DUB-66). It looked like one —
+   the rotate prompt replaces the app, and the rotation reads as the instruction
+   — but both halves of that turned out to be false: `useMotionRootClass` runs
+   above the landscape early return in `App.tsx`, so the root class does reach
+   the prompt, and the `auto`/reduce row already ships the glyph frozen with the
+   copy carrying the instruction on its own. A 2s infinite 90° loop on a screen
+   the player cannot tap past, served to someone who asked Settings for less
+   motion, is the WCAG 2.2.2 shape this whole ticket exists to remove.
+   ========================================================================= */
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -311,8 +354,15 @@
   animation: sheet-in var(--motion-base) var(--ease);
 }
 
+/* The resolved flag. A root class rather than a `.sheet--still` prop, because
+   every panel in the game shares this one component. */
+html.is-still .sheet {
+  animation: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .sheet {
+  /* First paint, and the player who never opens Settings. */
+  html:not(.is-moving) .sheet {
     animation: none;
   }
 }
@@ -843,23 +893,29 @@
   transform-origin: right center;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  /* The scale goes, the ring and the price colour do not. Reduced motion removes
-     movement, not feedback.
+/* The scale goes, the ring and the price do not. Reduced motion removes
+   movement, not feedback — the same line the ★ celebration takes.
+ *
+ * Keyed off `.cta--still`, which `ctaClassName` emits from the resolved store
+ * flag. `.cta.cta--still.cta--pressed` is (0,3,0), one class clear of the
+ * `.cta.cta--pressed` it has to cancel — the same specificity care the press
+ * rules themselves needed, for the same reason. */
+.cta.cta--still.cta--pressed,
+.cta.cta--still:active,
+.cta.cta--still.cta--pressed:not(.cta--affordable) .cta__price,
+.cta.cta--still:active:not(.cta--affordable) .cta__price {
+  transform: none;
+}
 
-     Not quite "the same line the ★ celebration takes", which is what this
-     comment used to claim: the ★ and the HUD meter key off the store's resolved
-     value, which folds this media query together with the Settings
-     `auto | on | off` toggle. This rule sees the media query only, so a player
-     who sets Reduced motion = on in Settings while their OS says nothing still
-     gets the shrink. Pre-existing and wider than the CTA — `.sheet` and `.card`
-     entrances have the same gap — so it is tracked as DUB-49 rather than fixed
-     here, where the fix is a class the store drives. The press still degrades
-     safely in the meantime: the ring and the price survive either way. */
-  .cta.cta--pressed,
-  .cta:active,
-  .cta.cta--pressed:not(.cta--affordable) .cta__price,
-  .cta:active:not(.cta--affordable) .cta__price {
+@media (prefers-reduced-motion: reduce) {
+  /* First paint, and the player who never opens Settings. Stands down for an
+     explicit `off`, which is what `:not(.is-moving)` buys: on an affordable
+     button the scale is the only press treatment there is, so suppressing it
+     against the player's word leaves the thumb with no answer at all. */
+  html:not(.is-moving) .cta.cta--pressed,
+  html:not(.is-moving) .cta:active,
+  html:not(.is-moving) .cta.cta--pressed:not(.cta--affordable) .cta__price,
+  html:not(.is-moving) .cta:active:not(.cta--affordable) .cta__price {
     transform: none;
   }
 }
@@ -895,8 +951,16 @@
   overscroll-behavior: contain;
 }
 
+/* The resolved flag — the offline-return card and the club-complete card both
+   use this component, so it takes the root class for the same reason `.sheet`
+   does. */
+html.is-still .card {
+  animation: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .card {
+  /* First paint, and the player who never opens Settings. */
+  html:not(.is-moving) .card {
     animation: none;
   }
 }
@@ -1163,6 +1227,10 @@
   animation: spin 900ms linear infinite;
 }
 
+/* Deliberately OS-only, the one exception in the file: the spinner runs before
+   the saved preference has been read, so the store has nothing to say yet, and
+   this block slows the spin rather than stopping it — there is no suppression
+   here for the toggle to be heard about. */
 @media (prefers-reduced-motion: reduce) {
   .boot__spinner {
     animation-duration: 2.4s;
@@ -1232,8 +1300,18 @@
   animation: rotate-hint 2s var(--ease) infinite;
 }
 
+/* The resolved flag. A root class rather than a prop, as with `.sheet` and
+   `.card`: the glyph is the only thing on the screen and renders no class list
+   of its own. Upright and still — the copy ("Turn your phone upright") carries
+   the instruction without the rotation, which is why freezing it is safe. */
+html.is-still .fatal__rotate-glyph {
+  animation: none;
+  transform: rotate(0deg);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .fatal__rotate-glyph {
+  /* First paint, and the player who never opens Settings. */
+  html:not(.is-moving) .fatal__rotate-glyph {
     animation: none;
     transform: rotate(0deg);
   }
