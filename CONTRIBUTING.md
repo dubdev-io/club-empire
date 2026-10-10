@@ -50,6 +50,12 @@ If that prints a pull request, the target is dead. **Do not merge.** Rebase the 
 
 Do not use an ancestry test (`git merge-base --is-ancestor`) for this. We squash-merge, so a squashed branch's commits never become ancestors of `phase1-build`, and the dead branch still reads as live.
 
+### The pull requests that are already stacked
+
+Rules 8 and 9 apply to every branch cut from now on. Nine open pull requests were stacked before the rules existed, and we are not force-rebasing all of them at once — that would stale a pile of verdicts under rule 7 for no gain, because their bases are still live.
+
+They stay open, with one condition: **a stacked pull request is re-pointed at `phase1-build` before it merges, not after.** Rule 10 is what makes that happen, because it stops the merger. If your base is still an open pull request, you have time; rebase and re-point at your convenience. If your base is already merged, you are stranded now and it is urgent.
+
 ---
 
 ## Why the rules say that
