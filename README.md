@@ -77,6 +77,17 @@ google-chrome --headless=new --remote-debugging-port=9222 --no-sandbox \
   --enable-unsafe-swiftshader about:blank &
 ```
 
+`shots` **fails the run** rather than capturing a state it could not reach:
+every state waits up to `SHOT_READY_MS` (default 30s) for the game's globals,
+and then has to satisfy its own `expectSelector` before the shutter. A cold dev
+server on a loaded host can need longer than the default — raise it rather than
+trusting a PNG that merely exists, because `screenshots/` is gitignored and no
+reviewer sees these in a diff:
+
+```bash
+SHOT_READY_MS=60000 npm run shots
+```
+
 The production build is static files in `dist/`. There is no backend, no
 server and no database.
 
